@@ -1,0 +1,216 @@
+// ===== İletişim Modülü =====
+// Sorumluluklar: WiFi bağlantısı, WebSocket protokolü, gelen mesaj yönlendirme.
+// Navigasyon iç state'ine doğrudan erişmez — navCommand* arayüzünü kullanır.
+
+#include <WiFi.h>
+#include <WebSocketsClient.h>
+#include <ArduinoJson.h>
+#include "types.h"
+
+// =============================================================================
+// Bağlantı durumu — bu modülün sahibi websocket.ino
+// =============================================================================
+WebSocketsClient webSocket;
+bool wsConnected     = false;
+
+static unsigned long lastStatusSend = 0;
+static unsigned long lastPing       = 0;
+
+// ===== WiFi / Sunucu Ayarları =====
+static const char* WIFI_SSID  = "AGV_SERVER";
+static const char* WIFI_PASS  = "agv12345";
+static const char* SERVER_IP  = "192.168.4.1";
+static const int   SERVER_PORT = 80;
+static const char* AGV_ID     = "AGV_1";   // Her araca benzersiz ID
+
+// =============================================================================
+// Gelen mesaj yönlendirici — webSocketEvent'ten önce tanımlanmalı
+// =============================================================================
+
+static void handleServerMessage(uint8_t* payload, size_t length) {
+    StaticJsonDocument<256> doc;
+    if (deserializeJson(doc, payload, length)) {
+        return;
+    }
+
+    const char* type = doc["type"];
+
+    // --- AGV'den sunucuya giden mesajların echo'ları ---
+    if (strcmp(type, "registered") == 0) {
+        return;
+    }
+    if (strcmp(type, "pong") == 0) return;
+
+    // --- Konum bildir (başlangıç noktası) ---
+    if (strcmp(type, "setPosition") == 0) {
+        const char* wp = doc["waypoint"];
+        if (wp && wp[0]) navCommandSetPosition(wp[0]);
+        return;
+    }
+
+    // --- Hedef ---
+    if (strcmp(type, "setTarget") == 0) {
+        const char* wp = doc["waypoint"];
+        if (wp && wp[0]) navCommandSetTarget(wp[0]);
+        return;
+    }
+
+    // --- PID ayarı ---
+    if (strcmp(type, "setPID") == 0) {
+        navCommandSetPID(
+            doc["Kp"] | pidParams.Kp,
+            doc["Ki"] | pidParams.Ki,
+            doc["Kd"] | pidParams.Kd
+        );
+        return;
+    }
+
+    // --- Hız ayarı ---
+    if (strcmp(type, "setSpeed") == 0) {
+        navCommandSetSpeed(doc["speed"] | baseSpeed);
+        return;
+    }
+
+    // --- Komutlar ---
+    if (strcmp(type, "command") == 0) {
+        const char* cmd = doc["command"];
+        if      (strcmp(cmd, "start")     == 0) navCommandStart();
+        else if (strcmp(cmd, "stop")      == 0) navCommandStop();
+        else if (strcmp(cmd, "calibrate") == 0) navCommandCalibrate();
+        return;
+    }
+}
+
+// =============================================================================
+// Başlatma
+// =============================================================================
+
+void wifiInit() {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+    for (int i = 0; i < 30 && WiFi.status() != WL_CONNECTED; i++) {
+        delay(500);
+    }
+}
+
+void webSocketInit() {
+    webSocket.begin(SERVER_IP, SERVER_PORT, "/ws");
+
+    // Lambda kullanılıyor: Arduino IDE named function için prototype üretemez,
+    // bu yüzden WStype_t include'dan önce görülür ve derleme hata verir.
+    // Lambda bu sorunu tamamen ortadan kaldırır.
+    webSocket.onEvent([](WStype_t type, uint8_t* payload, size_t length) {
+        switch (type) {
+            case WStype_CONNECTED:
+                wsConnected = true;
+                {
+                    StaticJsonDocument<64> doc;
+                    doc["type"] = "register";
+                    doc["id"]   = AGV_ID;
+                    String msg; serializeJson(doc, msg);
+                    webSocket.sendTXT(msg);
+                }
+                break;
+
+            case WStype_DISCONNECTED:
+                wsConnected = false;
+                navCommandStop();
+                break;
+
+            case WStype_TEXT:
+                handleServerMessage(payload, length);
+                break;
+
+            default:
+                break;
+        }
+    });
+
+    webSocket.setReconnectInterval(3000);
+}
+
+// =============================================================================
+// Ana döngü — loop() tarafından çağrılır
+// =============================================================================
+
+void webSocketLoop() {
+    webSocket.loop();
+
+    if (!wsConnected) return;
+
+    unsigned long now = millis();
+    if (now - lastStatusSend >= STATUS_INTERVAL) {
+        sendStatus();
+        lastStatusSend = now;
+    }
+    if (now - lastPing >= PING_INTERVAL) {
+        sendPing();
+        lastPing = now;
+    }
+}
+
+// =============================================================================
+// Gönderim fonksiyonları
+// =============================================================================
+
+void sendStatus() {
+    StaticJsonDocument<768> doc;
+    doc["type"]      = "status";
+    char cwStr[2] = {currentWaypoint ? currentWaypoint : '?', 0};
+    char twStr[2] = {targetWaypoint  ? targetWaypoint  : '?', 0};
+    doc["currentWaypoint"] = cwStr;
+    doc["targetWaypoint"]  = twStr;
+    // Yol dizisini "A>B>E>H" formatında gönder
+    char pathStr[MAX_PATH_LENGTH * 2 + 1] = "";
+    for (int i = 0; i < navPathLength; i++) {
+        char seg[3] = {navPath[i], (i < navPathLength - 1 ? '>' : '\0'), '\0'};
+        strncat(pathStr, seg, sizeof(pathStr) - strlen(pathStr) - 1);
+    }
+    doc["path"]      = pathStr;
+    doc["pathIdx"]   = navPathIndex;
+    doc["heading"]   = getHeadingName();
+    doc["linePos"]   = linePosition;
+    doc["Kp"]        = pidParams.Kp;
+    doc["Ki"]        = pidParams.Ki;
+    doc["Kd"]        = pidParams.Kd;
+    doc["baseSpeed"] = baseSpeed;
+    doc["calibrated"]= calibData.isCalibrated;
+    doc["isTarget"]  = isTarget;
+
+    switch (navState) {
+        case NAV_IDLE:        doc["navState"] = "IDLE";        break;
+        case NAV_TURNING:     doc["navState"] = "TURNING";     break;
+        case NAV_FOLLOWING:   doc["navState"] = "FOLLOWING";   break;
+        case NAV_AT_JUNCTION: doc["navState"] = "JUNCTION";    break;
+        case NAV_REACHED:     doc["navState"] = "REACHED";     break;
+        case NAV_LINE_SEARCH: doc["navState"] = "LINE_SEARCH"; break;
+        default:              doc["navState"] = "UNKNOWN";     break;
+    }
+
+    doc["sonarDist"] = getSonarDistance();
+    doc["obstacle"]  = isObstacleDetected();
+
+    JsonArray sensors = doc.createNestedArray("sensors");
+    for (int i = 0; i < SENSOR_COUNT; i++) sensors.add(sensorCalibrated[i]);
+
+    String msg; serializeJson(doc, msg);
+    webSocket.sendTXT(msg);
+}
+
+void sendPing() {
+    StaticJsonDocument<32> doc;
+    doc["type"] = "ping";
+    String msg; serializeJson(doc, msg);
+    webSocket.sendTXT(msg);
+}
+
+void sendLog(const char* message) {
+    if (!wsConnected) return;
+    StaticJsonDocument<128> doc;
+    doc["type"]    = "log";
+    doc["agvId"]   = AGV_ID;
+    doc["message"] = message;
+    String msg; serializeJson(doc, msg);
+    webSocket.sendTXT(msg);
+}

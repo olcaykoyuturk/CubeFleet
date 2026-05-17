@@ -1,0 +1,92 @@
+==============================================================================
+ESP32 NodeMCU — GPIO Dağılım Tablosu
+Proje: AGV Grid Navigasyon Sistemi
+Güncelleme: 2026-04-16
+==============================================================================
+
+  GPIO  | Yön  | Bileşen              | Açıklama
+--------|------|----------------------|------------------------------------------
+  GPIO2 | OUT  | LED                  | Durum LED'i (kalibrasyon geri bildirimi)
+  GPIO4 | OUT  | MOSFET Gate          | Elektromıknatıs sürücüsü (P16/25 5V, 2kg)
+  GPIO5 | OUT  | MUX S2               | 74HC4051 kanal seç [!strapping — ok]
+ GPIO12 | OUT  | Servo 3              | MG90S PWM [!MTDI strapping — LOW bırak boot'ta]
+ GPIO13 | IN   | HC-SR04 ECHO         | Ultrasonik mesafe — gelen sinyal
+ GPIO14 | OUT  | Servo 2              | MG90S PWM
+ GPIO15 | OUT  | RC522 SS/CS          | RFID SPI chip-select [!strapping — HIGH=ok]
+ GPIO16 | OUT  | MUX S0               | 74HC4051 kanal seç
+ GPIO17 | OUT  | MUX S1               | 74HC4051 kanal seç
+ GPIO18 | OUT  | RC522 SCK            | RFID SPI saat
+ GPIO19 | OUT  | RC522 MOSI           | RFID SPI veri (ESP→RC522)
+ GPIO21 | I/O  | I2C SDA              | OLED veri hattı
+ GPIO22 | I/O  | I2C SCL              | OLED saat hattı
+ GPIO23 | OUT  | HC-SR04 TRIG         | Ultrasonik — tetik sinyali
+ GPIO25 | OUT  | ZK-BM1 IN3 (Sağ)    | Sağ motor yön/PWM
+ GPIO26 | OUT  | ZK-BM1 IN4 (Sağ)    | Sağ motor yön/PWM
+ GPIO27 | OUT  | Servo 1              | MG90S PWM
+ GPIO32 | OUT  | ZK-BM1 IN1 (Sol)    | Sol motor yön/PWM
+ GPIO33 | OUT  | ZK-BM1 IN2 (Sol)    | Sol motor yön/PWM
+ GPIO34 | IN   | MUX SIG              | 74HC4051 analog çıkış → ADC [input-only]
+ GPIO35 | IN   | RC522 MISO           | RFID SPI veri (RC522→ESP) [input-only]
+
+==============================================================================
+KULLANILMAYAN / REZERVE GPIOlar
+==============================================================================
+
+  GPIO  | Durum      | Not
+--------|------------|------------------------------------------------------
+  GPIO0 | REZERVE    | Boot butonu — kullanma
+  GPIO1 | REZERVE    | UART0 TX (Serial debug)
+  GPIO3 | REZERVE    | UART0 RX (Serial debug)
+ GPIO36 | SERBEST    | Input-only (SVP) — gelecekte analog sensör
+ GPIO39 | SERBEST    | Input-only (SVN) — gelecekte analog sensör
+GPIO6-11| DOKUNMA    | SPI Flash — kesinlikle kullanma
+
+==============================================================================
+GÜÇ DAĞILIMI
+==============================================================================
+
+  7.4V LiPo (2S, 40C)
+    ├── XL4016 (8A Step-Down) → 5V
+    │     ├── ZK-BM1 Motor Sürücü (VM)
+    │     └── Servo 1/2/3 (VCC)
+    │
+    └── XL4005 (5A Step-Down) → 3.3V–5V
+          ├── ESP32 (VIN)
+          ├── 74HC4051 (VCC)
+          ├── QTR-8A (5V — bypass yok, doğrudan 5V)
+          ├── HC-SR04 (VCC)
+          ├── RC522 (3.3V — 5V verme!)
+          └── OLED (3.3V veya 5V, modüle göre)
+
+==============================================================================
+UYARILAR
+==============================================================================
+
+[!] GPIO12 (Servo 3): MTDI strapping pin. Boot sırasında HIGH olursa ESP32
+    flash voltajını yanlış seçer ve açılmaz. Servo sinyal kablosunu boot
+    bitmeden önce HIGH çeken bir devre bağlama.
+
+[!] GPIO15 (RC522 SS): MTDO strapping pin. LOW olursa boot logu susar.
+    SS default HIGH (chip seçilmemiş) olduğu için genelde sorun çıkmaz.
+
+[!] GPIO5 (MUX S2): Strapping pin, boot'ta HIGH. MUX için zararsız.
+
+[!] RC522: 3.3V ile çalışır! 5V bağlanırsa yanar.
+
+[!] Elektromıknatıs (~500mA): ESP32 GPIO maksimum 12mA verebilir.
+    IRLZ44N MOSFET + flyback diyot (1N4007) şart.
+    MOSFET Gate → GPIO4, Drain → mıknatıs(-), Source → GND
+    Mıknatıs (+) → 5V (XL4016 çıkışı)
+
+==============================================================================
+DURUM: MEVCUT / PLANLANAN
+==============================================================================
+
+[AKTIF]   ZK-BM1 + Motorlar    — Çalışıyor
+[AKTIF]   74HC4051 + QTR-8A    — Çalışıyor, kalibre edilmiş
+[AKTIF]   WebSocket → Server   — Çalışıyor
+[PLANLANAN] HC-SR04            — Pin atandı, kod yazılmadı
+[PLANLANAN] RC522 RFID         — Pin atandı, kod yazılmadı
+[PLANLANAN] OLED               — Pin atandı, kod yazılmadı
+[PLANLANAN] Servo 1/2/3        — Pin atandı, kod yazılmadı
+[PLANLANAN] Elektromıknatıs    — Pin atandı, kod yazılmadı

@@ -1,0 +1,5 @@
+opencv-contrib-python>=4.8.0
+numpy>=1.24.0
+customtkinter>=5.2.0
+pillow>=10.0.0
+websocket-client>=1.6.0
