@@ -26,12 +26,17 @@
 // ===== Kamera (OV3660) =====
 // OV3660 hardware JPEG destekliyor; PSRAM ile yuksek cozunurluk rahat kalkar.
 //
-// FRAMESIZE_QVGA   320x240   ~25-30 fps  <-- secildi: WiFi'da en stabil, renk tespiti yeterli
-// FRAMESIZE_HVGA   480x320   ~18-22 fps  (orta yol, biraz daha detay)
-// FRAMESIZE_VGA    640x480   ~10 fps     (detay iyi ama WiFi'da takiliyor)
+// FRAMESIZE_QVGA   320x240   ~25-30 fps  HSV renk tespiti icin yeterli
+// FRAMESIZE_HVGA   480x320   ~18-22 fps  <-- secildi: YOLO inference icin
+//                                            detay yeterli, AP modunda stabil
+// FRAMESIZE_VGA    640x480   ~10 fps     daha cok detay, AP modunda zorlanabilir
 // FRAMESIZE_SVGA   800x600   ~7-8 fps
 // FRAMESIZE_HD     1280x720  ~5 fps
-#define CAM_FRAMESIZE   FRAMESIZE_QVGA
+//
+// YOLOv8 inference (main_yolo.py) tipik olarak imgsz=320 ile calisir →
+// HVGA 480x320 zaten o boyuta yakin, ekstra detay PC'de model.predict
+// downscale ile kaybolur. Daha buyuk = bandwidth + CPU israfi.
+#define CAM_FRAMESIZE   FRAMESIZE_HVGA
 
 // JPEG kalitesi: 0 (en iyi, en buyuk) - 63 (en kotu, en kucuk)
 // Hardware JPEG'de dusuk sayi CPU'yu yormaz, 10-12 ideal

@@ -129,9 +129,7 @@ void navCommandSetPID(float kp, float ki, float kd);
 void navCommandSetSpeed(int speed);
 void navCommandCalibrate();
 bool navCommandApplyCalibration(const int* minVals, const int* maxVals);
-// Multi-AGV planner: 2-hop look-ahead emir. from = mevcut konum dogrulamasi,
-// next = simdi gitilecek node, after = next'ten sonraki node (0 ise duracak),
-// goal = mission nihai hedefi (REACHED check icin). goal=0 ise after kullanilir.
+// Multi-AGV planner: 2-hop look-ahead emir + mission goal (REACHED check).
 void navCommandHop(char from, char next, char after, char goal = 0);
 
 // --- pathfinder.ino ---
@@ -144,7 +142,7 @@ void webSocketInit();
 void webSocketLoop();
 void sendStatus();
 void sendLog(const char* message);
-// Multi-AGV planner: hop tamamlandi bildirimi. PC bunu alip planner.on_hop_complete(agv, node) cagirir.
+// Multi-AGV planner: hop tamamlandi bildirimi.
 void sendHopComplete(char node, const char* heading);
 void sendCalibrationData();
 void wsFlush(int yields = 3);

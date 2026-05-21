@@ -280,8 +280,6 @@ static void handleJunction() {
         sendLog(buf);
 
         // Planner senkronizasyonu: hop tamamlandi bildir.
-        // Multi-AGV mod kullanilmasa bile bu mesaj zararsiz — PC tarafi planner
-        // tutmadigi AGV'ler icin sessizce gormezden gelir.
         sendHopComplete(rfidWP, headingToStr(heading));
 
         // Yön kalibrasyonu (önceki node ile şimdiki arasından)
@@ -308,19 +306,17 @@ static void handleJunction() {
     // 3. Yolda ilerle
     navPathIndex++;
     if (navPathIndex >= navPathLength) {
-        // navPath sona vardi ama hedefe ulasilamadi — muhtemelen PC'nin
-        // continuous update mesaji (after=D) bize gec ulasti. Kisa sure
-        // webSocketLoop ile bekle, gelirse navPath uzar ve devam edilir.
+        // navPath sona vardi ama hedefe ulasilamadi — PC continuous update
+        // mesaji gec ulasmis olabilir. Kisa sure webSocketLoop ile bekle.
         sendLog("Yol son node'a vardi, setHop bekleniyor...");
         motorStop();
         unsigned long waitStart = millis();
-        // 3 saniye bekle — WS gecikmesi (ESP32 + server queue) ~1s olabilir,
-        // 1.5s yetmedi. 3s genelde yeterli, AGV continuous hop'u yakalar.
+        // 3 saniye bekle (WS gecikmesi ~1s olabilir, 1.5s yetmiyor)
         const unsigned long SETHOP_WAIT_MS = 3000;
         while (millis() - waitStart < SETHOP_WAIT_MS) {
             webSocketLoop();
-            if (navState == NAV_IDLE) return;   // stop komutu geldi
-            if (navPathIndex < navPathLength) break;  // yeni hop geldi
+            if (navState == NAV_IDLE) return;
+            if (navPathIndex < navPathLength) break;
             delay(10);
         }
         if (navPathIndex >= navPathLength) {
@@ -660,15 +656,6 @@ bool navCommandApplyCalibration(const int* minVals, const int* maxVals) {
 // Multi-AGV Planner emirleri
 // =============================================================================
 
-// Planner'in 2-hop look-ahead emri. from = mevcut konum dogrulamasi (RFID ile
-// senkron tutariz), next = simdi gitilecek waypoint, after = sonraki (0 ise
-// next'te durup hopComplete sonrasi bekler).
-//
-// Idempotency + continuous hop davranisi:
-//   - Eger AGV halihazirda from→next yapiyorsa (NAV_FOLLOWING/TURNING/JUNCTION),
-//     state'i bozmadan sadece after'i guncelle → AGV duruksuz devam.
-//   - Aksi: tam yeni hop (NAV_TURNING'e gec).
-// Detayli debug log icin state ismi
 static const char* navStateName(NavState s) {
     switch (s) {
         case NAV_IDLE:        return "IDLE";
@@ -682,7 +669,6 @@ static const char* navStateName(NavState s) {
 }
 
 void navCommandHop(char from, char next, char after, char goal) {
-    // ===== DETAYLI LOG: gelen emrin tam bilgisi =====
     char dlog[128];
     snprintf(dlog, sizeof(dlog),
              "[HOP-IN] from=%c next=%c after=%c goal=%c | AGV=%c state=%s "
@@ -694,13 +680,11 @@ void navCommandHop(char from, char next, char after, char goal) {
                  ? navPath[navPathIndex] : '-');
     sendLog(dlog);
 
-    // Safety: from==next anlamsiz.
     if (from == next) {
         sendLog("setHop: from==next, gozardi");
         return;
     }
 
-    // Konum dogrulama
     if (currentWaypoint == 0) {
         currentWaypoint = from;
     } else if (currentWaypoint != from) {
@@ -712,7 +696,6 @@ void navCommandHop(char from, char next, char after, char goal) {
         return;
     }
 
-    // Idempotent / continuous hop: AGV zaten from→next yapiyor mu?
     bool sameHop = (currentWaypoint == from
                     && navPathLength > navPathIndex
                     && navPath[navPathIndex] == next);
@@ -721,7 +704,6 @@ void navCommandHop(char from, char next, char after, char goal) {
                     || navState == NAV_AT_JUNCTION);
 
     if (sameHop && moving) {
-        // Continuous update — sadece after'i guncelle
         int afterIdx = navPathIndex + 1;
         if (after != 0 && afterIdx < MAX_PATH_LENGTH) {
             navPath[afterIdx] = after;
@@ -729,7 +711,6 @@ void navCommandHop(char from, char next, char after, char goal) {
         } else {
             navPathLength  = navPathIndex + 1;
         }
-        // targetWaypoint: mission goal varsa o, yoksa after veya next
         targetWaypoint = (goal != 0) ? goal
                                      : ((after != 0) ? after : next);
         char buf[48];
@@ -739,12 +720,8 @@ void navCommandHop(char from, char next, char after, char goal) {
         return;
     }
 
-    // ===== RACE GUARD =====
-    // NAV_FOLLOWING / NAV_TURNING / NAV_LINE_SEARCH durumlarinda yeni full
-    // hop reddedilir (AGV yolda iken ters yone donmek zorunda kalir).
-    // NAV_AT_JUNCTION ise AGV junction'da yeni setHop BEKLIYOR (handleJunction
-    // wait loop) → kabul et. NAV_IDLE / NAV_REACHED zaten kabul.
-    // Continuous hop (sameHop branch) yukarida zaten ele alindi.
+    // RACE GUARD: NAV_FOLLOWING/TURNING/LINE_SEARCH'de yeni full hop reddedilir.
+    // NAV_AT_JUNCTION'da AGV setHop bekliyor (handleJunction wait) → kabul.
     if (navState == NAV_FOLLOWING ||
         navState == NAV_TURNING ||
         navState == NAV_LINE_SEARCH) {
@@ -770,8 +747,6 @@ void navCommandHop(char from, char next, char after, char goal) {
         navPathLength = 3;
     }
     navPathIndex   = 1;
-    // targetWaypoint: mission goal varsa o (REACHED check sadece gercek
-    // hedefte tetiklensin), yoksa lokal after veya next
     targetWaypoint = (goal != 0) ? goal
                                  : ((after != 0) ? after : next);
     isTarget       = true;

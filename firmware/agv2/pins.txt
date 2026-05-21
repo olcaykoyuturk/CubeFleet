@@ -1,12 +1,15 @@
 ==============================================================================
-ESP32 NodeMCU — GPIO Dağılım Tablosu — AGV_1
+ESP32 NodeMCU (D0WD-V3) — GPIO Dağılım Tablosu — AGV_2
 Proje: CubeFleet AGV Grid Navigasyon Sistemi
+
+AGV_2 NOTU: AGV_1 ile yapısal olarak aynı, tek donanım farkı MUX_S2 pini —
+AGV_1'de GPIO 5, AGV_2'de GPIO 27. Sebep: ESP32 SPI library default SS =
+GPIO 5, SPI.begin() sonrasında her transferde MUX_S2'yi bozuyordu.
 ==============================================================================
 
   GPIO  | Yön  | Bileşen              | Açıklama
 --------|------|----------------------|------------------------------------------
   GPIO2 | OUT  | LED                  | Durum LED'i (kalibrasyon geri bildirimi)
-  GPIO5 | OUT  | MUX S2               | 74HC4051 kanal seç [!strapping — ok]
  GPIO13 | IN   | HC-SR04 ECHO         | Ultrasonik mesafe — voltaj bölücü (1k+2k) ile 3.3V'a indir
  GPIO15 | OUT  | RC522 SS/CS          | RFID SPI chip-select [!strapping — HIGH=ok]
  GPIO16 | OUT  | MUX S0               | 74HC4051 kanal seç
@@ -18,6 +21,7 @@ Proje: CubeFleet AGV Grid Navigasyon Sistemi
  GPIO23 | OUT  | HC-SR04 TRIG         | Ultrasonik — tetik sinyali
  GPIO25 | OUT  | ZK-BM1 IN3 (Sağ)    | Sağ motor yön/PWM
  GPIO26 | OUT  | ZK-BM1 IN4 (Sağ)    | Sağ motor yön/PWM
+ GPIO27 | OUT  | MUX S2               | 74HC4051 kanal seç [AGV_2: GPIO 5'ten taşındı]
  GPIO32 | OUT  | ZK-BM1 IN1 (Sol)    | Sol motor yön/PWM
  GPIO33 | OUT  | ZK-BM1 IN2 (Sol)    | Sol motor yön/PWM
  GPIO34 | IN   | MUX SIG              | 74HC4051 analog çıkış → ADC [input-only]
@@ -33,9 +37,9 @@ KULLANILMAYAN / REZERVE GPIOlar
   GPIO1 | REZERVE    | UART0 TX (Serial debug)
   GPIO3 | REZERVE    | UART0 RX (Serial debug)
   GPIO4 | SERBEST    | (eski mıknatıs pini, şimdi boş)
+  GPIO5 | SERBEST*   | [!strapping — AGV_2'de SPI ile çakıştığı için MUX_S2 buradan taşındı; serbest ama dikkatli kullan]
  GPIO12 | SERBEST*   | [!MTDI strapping — boot'ta LOW kalmalı, dikkatli kullan]
  GPIO14 | SERBEST    | (eski servo pini, şimdi boş)
- GPIO27 | SERBEST    | (eski servo pini, şimdi boş)
  GPIO36 | SERBEST    | Input-only (SVP) — gelecekte analog sensör
  GPIO39 | SERBEST    | Input-only (SVN) — gelecekte analog sensör
 GPIO6-11| DOKUNMA    | SPI Flash — kesinlikle kullanma
@@ -63,17 +67,18 @@ GÜÇ DAĞILIMI
 UYARILAR
 ==============================================================================
 
+[!] GPIO27 (MUX S2 — AGV_2'ye özel): AGV_1'de GPIO 5 idi; ESP32 SPI library
+    default SS = GPIO 5 olduğu için SPI.begin() sonrasında her transferde
+    MUX_S2 mirror paterni oluşuyordu (S0=S4, S1=S5). AGV_2'de pin GPIO 27'ye
+    taşındı (boş, strapping değil, çakışma yok). FİZİKSEL KABLO DA GPIO 27'ye
+    gidiyor — sembolik değişiklik değil.
+
 [!] GPIO12 (SERBEST): MTDI strapping pin. Boot sırasında HIGH olursa ESP32
     flash voltajını yanlış seçer ve açılmaz. Bu pini OUT olarak kullanmadan
     önce 10kΩ pull-down ile zemine çek.
 
 [!] GPIO15 (RC522 SS): MTDO strapping pin. LOW olursa boot logu susar.
     SS default HIGH (chip seçilmemiş) olduğu için genelde sorun çıkmaz.
-
-[!] GPIO5 (MUX S2): Strapping pin, boot'ta HIGH. MUX için zararsız.
-    DİKKAT: ESP32 SPI library default SS = GPIO 5. SPI.begin() bazı
-    sürümlerde GPIO 5'i bozar. AGV_2'de bu yüzden MUX_S2 GPIO 27'ye taşındı.
-    AGV_1'de Core sürümü farkından dolayı tesadüfen çalışıyor.
 
 [!] RC522: 3.3V ile çalışır! 5V bağlanırsa yanar.
 

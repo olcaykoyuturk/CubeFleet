@@ -98,7 +98,6 @@ void updateSonar() {
     bool inStop = (sonarDistance > 0 && sonarDistance < OBSTACLE_STOP_CM);
     bool inSlow = (sonarDistance > 0 && sonarDistance < OBSTACLE_SLOW_CM);
 
-    // STOP zone debounce
     if (inStop) {
         stopFarCount = 0;
         if (stopCloseCount < DEBOUNCE_MAX) stopCloseCount++;
@@ -109,7 +108,6 @@ void updateSonar() {
         if (stopFarCount >= DEBOUNCE_THRESHOLD) sonarObstacle = false;
     }
 
-    // SLOW zone debounce (icine STOP de dahil; STOP'ta zaten dururuz)
     if (inSlow) {
         slowFarCount = 0;
         if (slowCloseCount < DEBOUNCE_MAX) slowCloseCount++;

@@ -49,7 +49,8 @@ struct AGVClient {
 
     // Engel / sonar
     float sonarDist;
-    bool  obstacle;
+    bool  obstacle;     // STOP zone
+    bool  sonarSlow;    // SLOW zone
 };
 
 AGVClient agvs[MAX_AGVS];
@@ -120,16 +121,28 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
                       AwsEventType type, void *arg, uint8_t *data, size_t len) {
     switch (type) {
         case WS_EVT_CONNECT:
-            Serial.printf("WebSocket client #%u baglandi: %s\n",
-                         client->id(), client->remoteIP().toString().c_str());
+            Serial.printf("WebSocket client #%u baglandi: %s "
+                          "(total=%u, uptime=%lu ms, heap=%u)\n",
+                         client->id(),
+                         client->remoteIP().toString().c_str(),
+                         ws.count(), millis(), ESP.getFreeHeap());
             break;
 
         case WS_EVT_DISCONNECT:
-            Serial.printf("WebSocket client #%u ayrildi\n", client->id());
+            // Detayli drop logu — sebep teshisi icin: kalan client, uptime,
+            // heap. WiFi RSSI da yardimci olur ama AsyncWS bu evente vermez;
+            // bunu periyodik baska yerde basabiliriz.
             {
                 int idx = findAGVByClientId(client->id());
+                Serial.printf("WebSocket client #%u ayrildi "
+                              "(role=%s, total_after=%u, uptime=%lu ms, "
+                              "heap=%u, rssi=%d dBm)\n",
+                              client->id(),
+                              (idx >= 0) ? agvs[idx].id.c_str() : "PC?",
+                              ws.count(), millis(),
+                              ESP.getFreeHeap(),
+                              WiFi.RSSI());
                 if (idx >= 0) {
-                    Serial.printf("AGV %s baglantisi kesildi\n", agvs[idx].id.c_str());
                     agvs[idx].connected = false;
                     broadcastAGVList();
                 }
@@ -211,6 +224,13 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
         serializeJson(pong, pongStr);
         client->text(pongStr);
     }
+    else if (type == "pcHeartbeat") {
+        // PC -> AGV heartbeat. PC her ~1.5sn gonderir, AGV bunu alip
+        // lastPCActivityMs guncel tutar. Tum clientlere broadcast — AGV'ler
+        // PC kaynakli mesaj olarak gorur, ekstra tip kontrolu firmware'de.
+        // (Hafif: <30 byte, 1.5sn periyot = ~20 byte/sn ek trafik.)
+        ws.textAll(message);
+    }
     else if (type == "status") {
         // AGV durum guncellemesi
         int idx = findAGVByClientId(client->id());
@@ -231,6 +251,7 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
             agvs[idx].isTarget    = doc["isTarget"] | false;
             agvs[idx].sonarDist   = doc["sonarDist"] | 999.0f;
             agvs[idx].obstacle    = doc["obstacle"] | false;
+            agvs[idx].sonarSlow   = doc["sonarSlow"] | false;
 
             // Sensor verileri
             JsonArray sensors = doc["sensors"].as<JsonArray>();
@@ -248,6 +269,14 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
         String agvId = doc["agvId"].as<String>();
         String message = doc["message"].as<String>();
         broadcastLog(agvId, message);
+    }
+    else if (type == "calibrationData") {
+        // AGV manuel kalibrasyonu bitirdi, ham min/max degerlerini PC'ye yolla.
+        // Server bunu sadece tum clientlere broadcast eder; PC dinler + preset
+        // olarak kaydedebilir.
+        ws.textAll(message);
+        Serial.printf("[CALIB] %s'ten kalibrasyon verisi alindi, broadcast edildi\n",
+                     doc["agvId"].as<String>().c_str());
     }
 
     // ===== Dashboard'dan gelen komutlar =====
@@ -348,6 +377,55 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
             broadcastLog(agvId, logMsg);
         }
     }
+    else if (type == "applyCalibration") {
+        // PC'den gelen preset uygulama komutu. sensorMin + sensorMax dizilerini
+        // hedef AGV'ye aynen yonlendir; AGV runtime'da calibData'sini gunceller.
+        String agvId = doc["agvId"].as<String>();
+        int idx = findAGVById(agvId);
+        if (idx >= 0 && agvs[idx].connected) {
+            // Orijinal payload'i parametreyi tekrar serialize etmeden dogrudan yonlendir
+            ws.text(agvs[idx].clientId, message);
+            Serial.printf("applyCalibration gonderildi %s\n", agvId.c_str());
+            broadcastLog(agvId, "Kalibrasyon preset'i uygulandi");
+        }
+    }
+    // ===== Multi-AGV Planner mesajlari (PC -> AGV) =====
+    else if (type == "setHop") {
+        // PC planner'dan gelen 2-hop look-ahead emir.
+        // payload: {type:"setHop", agvId, from, next, after?, goal?}
+        // AGV from'dan next'e cizgi takibiyle gider, kavsakta after icin yon doner.
+        // goal: mission nihai hedefi — firmware "Hedefe ulasildi" kontrolu buna gore.
+        String agvId = doc["agvId"].as<String>();
+        int idx = findAGVById(agvId);
+        if (idx >= 0 && agvs[idx].connected) {
+            ws.text(agvs[idx].clientId, message);
+            const char* fromS  = doc["from"]  | "?";
+            const char* nextS  = doc["next"]  | "?";
+            const char* afterS = doc["after"] | "-";
+            const char* goalS  = doc["goal"]  | "-";
+            Serial.printf("setHop %s: %s>%s>%s goal=%s\n",
+                          agvId.c_str(), fromS, nextS, afterS, goalS);
+        }
+    }
+    else if (type == "clearMission") {
+        // Mission iptal: AGV duracak ve plana donmeyecek.
+        String agvId = doc["agvId"].as<String>();
+        int idx = findAGVById(agvId);
+        if (idx >= 0 && agvs[idx].connected) {
+            ws.text(agvs[idx].clientId, message);
+            Serial.printf("clearMission gonderildi %s\n", agvId.c_str());
+            broadcastLog(agvId, "Mission iptal edildi");
+        }
+    }
+    else if (type == "hopComplete") {
+        // AGV bir hop'u tamamladi, yeni node'da. Planner senkron olmali.
+        // payload: {type:"hopComplete", agvId, node, heading?}
+        // calibrationData pattern'i: tum clientlere broadcast.
+        ws.textAll(message);
+        Serial.printf("[HOP] %s -> %s\n",
+                      doc["agvId"].as<String>().c_str(),
+                      doc["node"].as<String>().c_str());
+    }
     else if (type == "getList") {
         // Dashboard AGV listesi istiyor
         broadcastAGVList();
@@ -377,6 +455,7 @@ void sendAGVUpdate(int idx) {
     doc["isTarget"]         = agvs[idx].isTarget;
     doc["sonarDist"]        = agvs[idx].sonarDist;
     doc["obstacle"]         = agvs[idx].obstacle;
+    doc["sonarSlow"]        = agvs[idx].sonarSlow;
 
     JsonArray sensors = doc.createNestedArray("sensors");
     for (int j = 0; j < 8; j++) sensors.add(agvs[idx].sensorValues[j]);
@@ -406,7 +485,9 @@ void broadcastLog(String agvId, String message) {
 
 // ===== AGV Listesini Broadcast Et =====
 void broadcastAGVList() {
-    StaticJsonDocument<2048> doc;
+    // 5 AGV × ~380 byte = ~1900 byte serialize + JSON overhead doc memory
+    // 2048 sınırda kalıyordu ve sessiz truncate riskı var. 4096'ya çıkardık.
+    StaticJsonDocument<4096> doc;
     doc["type"] = "agvList";
 
     JsonArray list = doc.createNestedArray("agvs");
@@ -431,6 +512,7 @@ void broadcastAGVList() {
             agv["isTarget"]        = agvs[i].isTarget;
             agv["sonarDist"]       = agvs[i].sonarDist;
             agv["obstacle"]        = agvs[i].obstacle;
+            agv["sonarSlow"]       = agvs[i].sonarSlow;
 
             JsonArray sensors = agv.createNestedArray("sensors");
             for (int j = 0; j < 8; j++) sensors.add(agvs[i].sensorValues[j]);

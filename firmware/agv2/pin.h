@@ -1,15 +1,25 @@
 #pragma once
 
 // =============================================================================
-// pin.h — Sadece donanım pin tanımları ve sabit donanım parametreleri
-// Davranış sabitleri için config.h'a bakın.
-// Tam bağlantı tablosu ve güç dağılımı için pins.txt'e bakın.
+// pin.h — AGV_2 (FARKLI ESP32 KARTI — pin haritası kontrol edilmeli)
+//
+// ⚠ ESP32-S3 / ESP32-C3 / ESP32-S2 kullanılıyorsa bu pinler ÇALIŞMAZ —
+// onlarda GPIO numaraları farklıdır. Klasik ESP32 (WROOM-32 / WROVER /
+// NodeMCU) için bu pinler doğrudur.
+//
+// Kart kontrol etmek için Arduino Serial Monitor'de boot log'una bak:
+//   "Chip: ESP32-D0WDQ6 rev 1" → klasik ESP32, pinler OK
+//   "Chip: ESP32-S3FH4R2"      → ESP32-S3, pinler revize edilmeli
+//   "Chip: ESP32-C3FN4"        → ESP32-C3, sadece 22 GPIO var, pinler revize
 // =============================================================================
 
 // ===== MUX Pinleri (74HC4051) =====
+// AGV_2'de GPIO 5 SPI library default SS'idir; SPI.begin sonrasında her
+// transferde MUX_S2'yi bozuyor. Pin GPIO 27'ye taşındı (boş, strapping
+// değil, hiçbir modülle çakışmaz).
 #define MUX_S0    16
 #define MUX_S1    17
-#define MUX_S2     5   // Strapping pin — boot sonrası güvenli
+#define MUX_S2    27   // ⚠ AGV_1: GPIO 5 → AGV_2: GPIO 27 (SPI çakışması yüzünden)
 #define MUX_SIG   34   // Analog giriş (GPIO34 input-only)
 
 // ===== Motor Pinleri (ZK-BM1 10A Sürücü) =====
@@ -42,6 +52,8 @@
 
 // NOT: Servolar ve elektromıknatıs ESP32-CAM'de (firmware/camera/) —
 // AGV üzerinde robot kol yok. Pin tanımları buradan kaldırıldı.
+// AYRICA: Eski SERVO_1_PIN=27 idi → MUX_S2=27 ile çakışıyordu (kod yazılmamıştı
+// neyse ki). Şimdi GPIO 27 sadece MUX_S2 olarak kullanılıyor.
 
 // ===== Sensör Sayısı =====
 #define SENSOR_COUNT   8   // QTR-8A fiziksel sensör adedi

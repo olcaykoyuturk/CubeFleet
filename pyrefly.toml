@@ -7,4 +7,7 @@
 # Cozum: asagidaki python-interpreter-path Pyrefly'e .venv'i tanitir.
 
 project-includes = ["pc"]
+# pc/ klasörünü import root olarak ekle — agv_ws_client, detector, vb.
+# modülleri (pc/ içindekiler) çözebilsin.
+search-path = ["pc"]
 python-interpreter-path = ".venv/Scripts/python.exe"

@@ -1,4 +1,4 @@
-// ===== İletişim Modülü =====
+// ===== İletişim Modülü — AGV_2 =====
 // Sorumluluklar: WiFi bağlantısı, WebSocket protokolü, gelen mesaj yönlendirme.
 // Navigasyon iç state'ine doğrudan erişmez — navCommand* arayüzünü kullanır.
 
@@ -14,8 +14,6 @@ WebSocketsClient webSocket;
 bool wsConnected     = false;
 
 // PC heartbeat tracker — PC'den gelen son mesaj zamani (any PC-originated type).
-// Server'in pong/registered cevaplari PC kaynakli degil, sayilmaz. PC her ~1.5sn
-// pcHeartbeat gonderir; arada setHop/komut da gelirse o da reset eder.
 // Timeout asilirsa AGV moving'se motor durdurur (PC oldu varsayimi).
 static volatile unsigned long lastPCActivityMs = 0;
 static const unsigned long PC_HEARTBEAT_TIMEOUT_MS = 3000;
@@ -32,7 +30,7 @@ static const char* WIFI_SSID  = "AGV_SERVER";
 static const char* WIFI_PASS  = "agv12345";
 static const char* SERVER_IP  = "192.168.4.1";
 static const int   SERVER_PORT = 80;
-static const char* AGV_ID     = "AGV_1";   // Her araca benzersiz ID
+static const char* AGV_ID     = "AGV_2";   // 2. araç
 
 // =============================================================================
 // Gelen mesaj yönlendirici — webSocketEvent'ten önce tanımlanmalı
@@ -54,10 +52,7 @@ static void handleServerMessage(uint8_t* payload, size_t length) {
     if (strcmp(type, "pong") == 0) return;
 
     // PC kaynakli her mesaj heartbeat sayilir → timer reset.
-    // (pcHeartbeat, setHop, command, vs hepsi PC'den gelir.)
     lastPCActivityMs = millis();
-
-    // pcHeartbeat sadece timer reset icin — no-op, return.
     if (strcmp(type, "pcHeartbeat") == 0) return;
 
     // --- Konum bildir (başlangıç noktası) ---
@@ -116,14 +111,12 @@ static void handleServerMessage(uint8_t* payload, size_t length) {
         return;
     }
 
-    // --- Multi-AGV Planner: setHop (2-hop look-ahead emir) ---
-    // payload: {type:"setHop", agvId, from, next, after?, goal?}
-    // goal: mission nihai hedefi (REACHED check'i icin); after lokal hop devam.
+    // --- Multi-AGV Planner: setHop (2-hop look-ahead emir + goal) ---
     if (strcmp(type, "setHop") == 0) {
         const char* from  = doc["from"];
         const char* next_ = doc["next"];
-        const char* after = doc["after"];   // null olabilir
-        const char* goal  = doc["goal"];    // null olabilir
+        const char* after = doc["after"];
+        const char* goal  = doc["goal"];
         if (from && from[0] && next_ && next_[0]) {
             navCommandHop(
                 from[0],
@@ -140,6 +133,7 @@ static void handleServerMessage(uint8_t* payload, size_t length) {
         navCommandStop();
         return;
     }
+
 }
 
 // =============================================================================
@@ -200,14 +194,11 @@ void webSocketInit() {
 // Ana döngü — loop() tarafından çağrılır
 // =============================================================================
 
-// PC heartbeat timeout kontrolu — moving AGV'yi PC ile baglanti kesilirse durdur.
-// AGV-server WS link saglikli olsa bile PC server'dan ayrildiysa (PC crash, WiFi
-// drop) heartbeat mesaji gelmez → asagida motorStop + IDLE.
+// PC heartbeat timeout — moving AGV'yi PC ile baglanti kesilirse durdur.
 static void checkPCHeartbeat() {
     if (!wsConnected) return;
-    if (lastPCActivityMs == 0) return;   // henuz mesaj yok, sayim baslamadi
+    if (lastPCActivityMs == 0) return;
     if (millis() - lastPCActivityMs < PC_HEARTBEAT_TIMEOUT_MS) return;
-    // Timeout — moving ise durdur
     if (navState == NAV_IDLE || navState == NAV_REACHED) return;
     sendLog("PC heartbeat timeout — motor STOP, IDLE'a gecildi");
     motorStop();
@@ -215,7 +206,7 @@ static void checkPCHeartbeat() {
     isTarget      = false;
     navPathIndex  = 0;
     navPathLength = 0;
-    lastPCActivityMs = millis();   // resetle, log spam onle
+    lastPCActivityMs = millis();
 }
 
 void webSocketLoop() {
@@ -322,9 +313,6 @@ void sendLog(const char* message) {
     webSocket.sendTXT(msg);
 }
 
-// Bir hop'u tamamladigimizi PC planner'a bildir. Yeni node + (ops) heading.
-// Planner bunu alip kendi `on_hop_complete(agv_id, node)` cagrir → rezervasyon
-// guncellenir + sonraki tick yeni setHop emri uretebilir.
 void sendHopComplete(char node, const char* heading) {
     if (!wsConnected) return;
     StaticJsonDocument<128> doc;
@@ -333,8 +321,7 @@ void sendHopComplete(char node, const char* heading) {
     char nodeStr[2] = { node, 0 };
     doc["node"]    = nodeStr;
     if (heading && heading[0]) doc["heading"] = heading;
-    // PC debug timing: firmware uptime ms — server'da ve PC'de latency olcumu
-    // icin kullanilir. Server bunu degistirmeden forward eder.
+    // PC debug timing: firmware uptime ms (PC latency olcumu).
     doc["time"]    = millis();
     String msg; serializeJson(doc, msg);
     webSocket.sendTXT(msg);

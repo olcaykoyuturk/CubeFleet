@@ -1,0 +1,29 @@
+{
+  "_comment": "AGV waypoint graph. Coordinates in cm (yaklaşık, A* heuristic için). Edge cost = gerçek ölçülen mesafe (cm). Tüm kenarlar undirected (bidirectional).",
+  "_updated": "2026-05-19",
+
+  "nodes": {
+    "A": {"x":  0, "y":  0},
+    "B": {"x": 20, "y":  0},
+    "C": {"x": 39, "y":  0},
+    "D": {"x":  0, "y": 38},
+    "E": {"x": 20, "y": 38},
+    "F": {"x": 39, "y": 38},
+    "G": {"x":  0, "y": 71},
+    "H": {"x": 20, "y": 72},
+    "I": {"x": 39, "y": 74}
+  },
+
+  "edges": [
+    {"from": "A", "to": "B", "cost": 20},
+    {"from": "B", "to": "C", "cost": 19},
+    {"from": "B", "to": "E", "cost": 38},
+    {"from": "C", "to": "F", "cost": 38},
+    {"from": "D", "to": "E", "cost": 20},
+    {"from": "D", "to": "G", "cost": 33},
+    {"from": "E", "to": "H", "cost": 34},
+    {"from": "F", "to": "I", "cost": 36},
+    {"from": "G", "to": "H", "cost": 20},
+    {"from": "H", "to": "I", "cost": 18}
+  ]
+}

@@ -1,0 +1,841 @@
+"""
+Fleet Planner — Multi-AGV koordinasyon.
+
+Tasarim ilkeleri:
+  - 2-hop look-ahead: AGV'ye `setHop {from, next, after, goal}` gonderilir.
+    Continuous hop: `sameHop` branch (after guncelle) AGV durmadan ilerler.
+  - Soft reservations: A* path planning sadece parked (DONE) AGV'leri block
+    sayar. Aktif AGV'lerin transient (1-2 sn) node rezervasyonlari A*'i uzun
+    yollara zorlamaz → AGV'ler paralel hareket eder.
+  - Cakisma cozumu conflict-detect katmaninda yapilir:
+      VERTEX active (ayni next) → loser WAIT
+      VERTEX parked → reroute, yoksa WAIT
+      EDGE_SWAP direct → loser YIELD (yan park) veya WAIT
+      EDGE_SWAP future (path overlap 3-4 hop) → reroute (edge blokla), yoksa WAIT
+  - Path planning'in disinda guvenlik katmani: AGV firmware race guard
+    (FOLLOWING/TURNING'de yeni hop reddet) + sonar 10cm STOP / 20cm SLOW.
+  - AGV pos planner path'inden saparsa on_hop_complete otomatik replan tetikler.
+
+JSON formati (pc/waypoints.json):
+    {"nodes": {"A": {"x": 0, "y": 0}, ...},
+     "edges": [{"from": "A", "to": "B", "cost": 20}, ...]}
+
+API:
+    p = FleetPlanner(graph)
+    p.add_mission(agv_id, goal, start=..., has_cargo=False)
+    p.on_hop_complete(agv_id, new_node)   # AGV hopComplete event'inden
+    p.set_agv_position(agv_id, node)      # manuel/drift correction
+    cmds = p.tick()                       # Dict[agv_id, HopCommand]
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, Iterable, List, Optional, Set, Tuple
+
+try:
+    from graph import Graph, edge_key       # script: python pc/fleet_planner.py
+except ModuleNotFoundError:
+    from pc.graph import Graph, edge_key    # module: from pc.fleet_planner import ...
+
+
+# =============================================================================
+# Enums
+# =============================================================================
+
+class MissionState(Enum):
+    QUEUED   = "queued"
+    ACTIVE   = "active"
+    YIELDING = "yielding"   # yan park yapildi, digerin gecmesi bekleniyor
+    DONE     = "done"
+
+
+class HopAction(Enum):
+    NORMAL = "normal"   # planda gosterilen hop'u uygula
+    YIELD  = "yield"    # yan park hop (current -> yield_park_node)
+    WAIT   = "wait"     # ulasilamaz / parked engel — dur
+    DONE   = "done"     # mission tamamlandi
+
+
+class ConflictType(Enum):
+    VERTEX    = "vertex"      # ikisi de ayni next_node hedefli (veya parked oradaki)
+    EDGE_SWAP = "edge_swap"   # head-on: bitisik (A→B vs B→A) veya future path overlap
+    NONE      = "none"
+
+
+# =============================================================================
+# Veri yapilari
+# =============================================================================
+
+@dataclass
+class Mission:
+    id:         int
+    agv_id:     str
+    start:      str
+    goal:       str
+    path:       List[str]
+    pos:        str          = ""
+    has_cargo:  bool         = False
+    fifo_order: int          = 0
+    state:      MissionState = MissionState.QUEUED
+    # Yield (yan park) state — sadece MissionState.YIELDING'te anlamli
+    yield_to:          Optional[str] = None  # hangi AGV'ye yol veriyoruz
+    yield_park_node:   Optional[str] = None  # nereye yan park ettik
+    yield_return_node: Optional[str] = None  # park sonrasi dondugumuz node
+
+    def __post_init__(self):
+        if not self.pos:
+            self.pos = self.start
+
+    @property
+    def current(self) -> str:
+        return self.pos
+
+    @property
+    def next_node(self) -> Optional[str]:
+        """Path uzerinde pos'tan sonraki node."""
+        if self.pos not in self.path:
+            return None
+        idx = self.path.index(self.pos)
+        return self.path[idx + 1] if idx + 1 < len(self.path) else None
+
+    @property
+    def after_node(self) -> Optional[str]:
+        if self.pos not in self.path:
+            return None
+        idx = self.path.index(self.pos)
+        return self.path[idx + 2] if idx + 2 < len(self.path) else None
+
+    @property
+    def is_done(self) -> bool:
+        return self.pos == self.goal
+
+
+@dataclass
+class HopCommand:
+    """AGV'ye gonderilecek emir. WS uzerinden `setHop` mesajiyla yollanir."""
+    agv_id: str
+    action: HopAction
+    from_:  str
+    next_:  Optional[str] = None
+    after_: Optional[str] = None
+    reason: str           = ""
+
+    def __repr__(self) -> str:
+        n = self.next_ or "-"
+        a = self.after_ or "-"
+        return f"<Hop {self.agv_id} {self.action.value} {self.from_}>{n}>{a} ({self.reason})>"
+
+
+@dataclass
+class Conflict:
+    type:         ConflictType
+    agv_a:        str
+    agv_b:        str
+    node_or_edge: object   # str (node) veya Tuple[str,str] (edge_key)
+    detail:       str = ""
+
+
+# =============================================================================
+# Reservation table
+# =============================================================================
+
+@dataclass
+class ReservationTable:
+    """Aktif AGV'lerin tuttugu node + edge."""
+    node_owner: Dict[str, str]              = field(default_factory=dict)
+    edge_owner: Dict[Tuple[str, str], str]  = field(default_factory=dict)
+
+    def reserve_node(self, node: str, agv: str) -> bool:
+        owner = self.node_owner.get(node)
+        if owner is not None and owner != agv:
+            return False
+        self.node_owner[node] = agv
+        return True
+
+    def reserve_edge(self, a: str, b: str, agv: str) -> bool:
+        key = edge_key(a, b)
+        owner = self.edge_owner.get(key)
+        if owner is not None and owner != agv:
+            return False
+        self.edge_owner[key] = agv
+        return True
+
+    def release_all_for(self, agv: str) -> None:
+        for n in [n for n, o in self.node_owner.items() if o == agv]:
+            del self.node_owner[n]
+        for e in [e for e, o in self.edge_owner.items() if o == agv]:
+            del self.edge_owner[e]
+
+    def blocked_nodes_for(self, agv: str) -> Set[str]:
+        return {n for n, o in self.node_owner.items() if o != agv}
+
+    def blocked_edges_for(self, agv: str) -> Set[Tuple[str, str]]:
+        return {e for e, o in self.edge_owner.items() if o != agv}
+
+
+# =============================================================================
+# Fleet Planner
+# =============================================================================
+
+class FleetPlanner:
+    def __init__(self, graph: Graph):
+        self.graph               = graph
+        self.reservations        = ReservationTable()
+        self.missions:           Dict[str, Mission] = {}   # agv_id -> aktif mission
+        self.queued:             List[Mission]      = []
+        self._mission_id_counter = 0
+        self._fifo_counter       = 0
+
+    # -----------------------------------------------------------------------
+    # Path planning helpers
+    # -----------------------------------------------------------------------
+
+    def _parked_blocked_nodes_for(self, agv_id: str) -> Set[str]:
+        """SADECE DONE state'teki AGV'lerin tuttugu node'lari donder.
+        Path planning'de kullanilir: aktif AGV'lerin transient (1-2 sn omurlu)
+        rezervasyonlari A*'i uzun yollara zorlamasin.
+
+        Aktif rezervasyonlar conflict-detect katmaninda (VERTEX/EDGE_SWAP)
+        yonetilir; orada VERTEX active = WAIT veya YIELD."""
+        blocked: Set[str] = set()
+        for n, owner in self.reservations.node_owner.items():
+            if owner == agv_id:
+                continue
+            owner_m = self.missions.get(owner)
+            if owner_m is not None and owner_m.state == MissionState.DONE:
+                blocked.add(n)
+        return blocked
+
+    def _plan_path(
+        self,
+        start:         str,
+        goal:          str,
+        agv_id:        str,
+        blocked_edges: Optional[Iterable[Tuple[str, str]]] = None,
+    ) -> Optional[List[str]]:
+        """A* ile path bul (soft reservations: sadece parked block).
+        blocked_edges opsiyonel ek engelleme — reroute icin cakisma edge'i."""
+        return self.graph.astar(
+            start, goal,
+            blocked_nodes = self._parked_blocked_nodes_for(agv_id),
+            blocked_edges = blocked_edges,
+        )
+
+    # -----------------------------------------------------------------------
+    # Mission API
+    # -----------------------------------------------------------------------
+
+    def add_mission(
+        self,
+        agv_id:    str,
+        goal:      str,
+        start:     Optional[str] = None,
+        has_cargo: bool          = False,
+    ) -> Mission:
+        """Yeni mission ekle. AGV'nin aktif mission'i varsa queued'a eklenir;
+        AGV mevcut mission'i bitirince queue otomatik aktive olur."""
+        self._mission_id_counter += 1
+        self._fifo_counter       += 1
+
+        existing = self.missions.get(agv_id)
+        if start is None:
+            start = existing.pos if existing else goal
+
+        # Eski mission DONE ise (parked obstacle) → temizle, yeni mission aktif olsun
+        if existing is not None and existing.state == MissionState.DONE:
+            self.reservations.release_all_for(agv_id)
+            del self.missions[agv_id]
+            existing = None
+
+        path = self._plan_path(start, goal, agv_id)
+        if path is None:
+            # Ulasilamaz — yine de mission olustur, _plan_hop her tick replan dener
+            path = [start]
+
+        m = Mission(
+            id          = self._mission_id_counter,
+            agv_id      = agv_id,
+            start       = start,
+            goal        = goal,
+            path        = path,
+            pos         = start,
+            has_cargo   = has_cargo,
+            fifo_order  = self._fifo_counter,
+            state       = MissionState.QUEUED,
+        )
+        if existing is None:
+            self.missions[agv_id] = m
+        else:
+            self.queued.append(m)
+
+        # start==goal ise mission anlik DONE
+        if m.is_done and existing is None:
+            self._finish_mission(agv_id)
+
+        return m
+
+    def set_agv_position(self, agv_id: str, node: str) -> None:
+        """AGV'nin gercek konumunu sisteme bildir. Pos path disindaysa replan."""
+        m = self.missions.get(agv_id)
+        if m is None:
+            return
+        m.pos = node
+        if node not in m.path and m.goal:
+            replan = self._plan_path(node, m.goal, agv_id)
+            if replan and len(replan) > 1:
+                m.path = replan
+
+    def on_hop_complete(self, agv_id: str, new_node: str) -> None:
+        """AGV hop'u tamamlayinca cagrilir. Pos guncelle, rezervasyon bosalt,
+        gerekirse replan. YIELDING state'te replan ETMEZ — park node'un
+        path disinda olmasi normaldir."""
+        m = self.missions.get(agv_id)
+        if m is None:
+            return
+        prev   = m.pos
+        m.pos  = new_node
+        # Eski node + edge rezervasyonlarini bosalt
+        if prev != new_node:
+            if self.reservations.node_owner.get(prev) == agv_id:
+                del self.reservations.node_owner[prev]
+            ekey = edge_key(prev, new_node)
+            if self.reservations.edge_owner.get(ekey) == agv_id:
+                del self.reservations.edge_owner[ekey]
+        if m.is_done:
+            self._finish_mission(agv_id)
+            return
+        # YIELDING'te park node off-path normaldir — yield_step yonetir.
+        if m.state == MissionState.YIELDING:
+            return
+        # Pos path disinda → replan (firmware reroute reddetti veya drift)
+        if new_node not in m.path and m.goal:
+            replan = self._plan_path(new_node, m.goal, agv_id)
+            if replan and len(replan) > 1:
+                m.path = replan
+
+    def _finish_mission(self, agv_id: str) -> None:
+        """Mission bitti. AGV parked olur (state=DONE). Queued mission varsa
+        otomatik aktive olur — yeni hedef icin tekrar setHop dispatch edilir."""
+        m = self.missions.get(agv_id)
+        if m is None:
+            return
+        m.state = MissionState.DONE
+        # Edge rezervasyonlari bosalt (artik hareket etmiyor)
+        for e in [e for e, o in self.reservations.edge_owner.items()
+                  if o == agv_id]:
+            del self.reservations.edge_owner[e]
+        # Pos node hard reserve kal (idle obstacle)
+        self.reservations.reserve_node(m.pos, agv_id)
+        # Bekleyen mission varsa otomatik aktive et
+        nxt = next((q for q in self.queued if q.agv_id == agv_id), None)
+        if nxt:
+            self.queued.remove(nxt)
+            self.reservations.release_all_for(agv_id)
+            nxt.pos   = m.pos
+            nxt.start = m.pos
+            self.missions[agv_id] = nxt
+
+    # -----------------------------------------------------------------------
+    # Tick — ana planlama dongusu
+    # -----------------------------------------------------------------------
+
+    def tick(self) -> Dict[str, HopCommand]:
+        """Her aktif AGV icin HopCommand uretir."""
+        commands: Dict[str, HopCommand] = {}
+        for m in self._prioritize_missions():
+            commands[m.agv_id] = self._plan_hop(m)
+        return commands
+
+    def _prioritize_missions(self) -> List[Mission]:
+        """Cargo > FIFO > ID. Sadece aktif (is_done olmayan)."""
+        active = [m for m in self.missions.values() if not m.is_done]
+        return sorted(
+            active,
+            key=lambda m: (not m.has_cargo, m.fifo_order, m.agv_id),
+        )
+
+    def _plan_hop(self, m: Mission) -> HopCommand:
+        """Bir mission icin sonraki hop komutunu hesapla.
+
+        Akis:
+          1. is_done → DONE
+          2. YIELDING state → yield_step (return veya WAIT)
+          3. Ulasilamaz path → replan dene
+          4. Conflict tespit → resolve (yield / wait / reroute)
+          5. next_node yoksa → WAIT
+          6. Normal hop — rezerve et + dispatch
+        """
+        if m.is_done:
+            return HopCommand(
+                agv_id=m.agv_id, action=HopAction.DONE,
+                from_=m.current, reason="mission complete",
+            )
+
+        # YIELDING: park'a vardiysa diger AGV'yi bekle, gectiyse don.
+        if m.state == MissionState.YIELDING:
+            return self._plan_yield_step(m)
+
+        # Replan tetikleyici:
+        #   1) path=[start] (ulasilamaz) — onceki replan basarisiz, retry
+        #   2) m.pos path'te yok — yol acildiysa replan
+        if (len(m.path) <= 1 or m.pos not in m.path) and m.pos != m.goal:
+            replan = self._plan_path(m.pos, m.goal, m.agv_id)
+            if replan and len(replan) > 1:
+                m.path = replan
+
+        # Cakisma tespit (parked + aktif AGV'ler)
+        conflict = self._detect_conflict(m)
+        if conflict.type != ConflictType.NONE:
+            return self._resolve_conflict(m, conflict)
+
+        # next_node yoksa: ulasilamaz veya hedefte
+        if m.next_node is None:
+            return HopCommand(
+                agv_id=m.agv_id, action=HopAction.WAIT,
+                from_=m.current, reason="no reachable path",
+            )
+
+        return self._normal_hop(m)
+
+    def _normal_hop(self, m: Mission, reason: str = "normal") -> HopCommand:
+        """Normal hop: AGV current'tan ayrilma emri verildi. Current node'u
+        BIRAK (diger AGV'ler oraya planlama yapabilir, sonar fiziksel mesafe
+        korur). next_node + edge'i reserve et."""
+        if m.next_node is None:
+            return HopCommand(
+                agv_id=m.agv_id, action=HopAction.WAIT,
+                from_=m.current, reason="no next",
+            )
+        # Current release — AGV oradan ayriliyor. Diger AGV'ler current'a
+        # planlama yapabilsin (paralel akış); fiziksel mesafe sonar'la korunur.
+        if self.reservations.node_owner.get(m.current) == m.agv_id:
+            del self.reservations.node_owner[m.current]
+        self.reservations.reserve_node(m.next_node, m.agv_id)
+        self.reservations.reserve_edge(m.current, m.next_node, m.agv_id)
+        m.state = MissionState.ACTIVE
+        return HopCommand(
+            agv_id = m.agv_id,
+            action = HopAction.NORMAL,
+            from_  = m.current,
+            next_  = m.next_node,
+            after_ = m.after_node,
+            reason = reason,
+        )
+
+    # -----------------------------------------------------------------------
+    # Conflict detection
+    # -----------------------------------------------------------------------
+
+    def _detect_conflict(self, me: Mission) -> Conflict:
+        """Cakisma tespiti. Donen tipler:
+          - VERTEX parked: parked AGV tam next_node'da
+          - VERTEX active: me.next ile other.{next, after} ortusur
+          - EDGE_SWAP direct: A→B vs B→A (bitisik komsular)
+          - EDGE_SWAP future: path overlap 3-4 hop ileride ters yonde
+        """
+        if me.next_node is None:
+            return Conflict(ConflictType.NONE, me.agv_id, "", "")
+
+        # 1) Parked AGV tam next'te
+        for other in self.missions.values():
+            if other.agv_id == me.agv_id or other.state != MissionState.DONE:
+                continue
+            if other.pos == me.next_node:
+                return Conflict(
+                    ConflictType.VERTEX, me.agv_id, other.agv_id, me.next_node,
+                    detail=f"parked at {other.pos}",
+                )
+
+        # 2) Aktif AGV cakismalari
+        for other in self.missions.values():
+            if other.agv_id == me.agv_id or other.state == MissionState.DONE:
+                continue
+            if other.is_done:
+                continue
+
+            # VERTEX: me.next, other'in next+after'inda mi?
+            # Sadece "next" karsilastirmak race uretir (eski log 03:18:58):
+            # AGV_2 B>E dispatch, o an AGV_1 H'ye gidiyor, AGV_1.after=E.
+            # AGV_2 yola cikinca AGV_1 H'ye varir, NOW conflict gec yakalan
+            # → 90° carpisma. after'a bakarak BASLAMADAN once yakalan.
+            other_future = {n for n in (other.next_node, other.after_node) if n}
+            if me.next_node in other_future:
+                return Conflict(
+                    ConflictType.VERTEX, me.agv_id, other.agv_id, me.next_node,
+                    detail=f"both target {me.next_node} (other near-future)",
+                )
+
+            # EDGE_SWAP direct: A→B vs B→A (bitisik komsular)
+            if (other.current == me.next_node
+                    and other.next_node == me.current):
+                return Conflict(
+                    ConflictType.EDGE_SWAP, me.agv_id, other.agv_id,
+                    edge_key(me.current, me.next_node),
+                    detail=f"head-on {me.current}-{me.next_node}",
+                )
+
+            # EDGE_SWAP future: path overlap 3-4 hop ileride ters yonde.
+            # Ornek bug (03:27:30): AGV_1 C-F-I-H-G (I→H) vs AGV_2 A-B-E-H-I
+            # (H→I). Direct EDGE_SWAP bunu kaciriyor (3 hop uzakta) →
+            # continuous-after ile her ikisi de I-H edge'inde bulusur. k=4
+            # lookahead ile baslamadan once yakalanir.
+            headon = self._find_path_headon(me, other, lookahead=4)
+            if headon:
+                return Conflict(
+                    ConflictType.EDGE_SWAP, me.agv_id, other.agv_id,
+                    edge_key(*headon),
+                    detail=f"future head-on edge {headon[0]}-{headon[1]}",
+                )
+
+        return Conflict(ConflictType.NONE, me.agv_id, "", "")
+
+    def _path_edges_from(
+        self, m: Mission, start: str, k: int,
+    ) -> List[Tuple[str, str]]:
+        """m.path uzerinde `start` node'undan baslayarak k tane (from,to)
+        edge donder. start path'te yoksa bos liste."""
+        if start not in m.path:
+            return []
+        idx = m.path.index(start)
+        edges: List[Tuple[str, str]] = []
+        end = min(idx + k, len(m.path) - 1)
+        for i in range(idx, end):
+            edges.append((m.path[i], m.path[i + 1]))
+        return edges
+
+    def _find_path_headon(
+        self, me: Mission, other: Mission, lookahead: int = 3,
+    ) -> Optional[Tuple[str, str]]:
+        """Iki AGV'nin path'inin lookahead edge ileride ters yonde kesisip
+        kesismedigini kontrol et. Bulursa me'nin yonunde (a, b) tuple."""
+        me_edges    = self._path_edges_from(me,    me.pos,    lookahead)
+        other_edges = self._path_edges_from(other, other.pos, lookahead)
+        for ma, mb in me_edges:
+            for oa, ob in other_edges:
+                if ma == ob and mb == oa:
+                    return (ma, mb)
+        return None
+
+    # -----------------------------------------------------------------------
+    # Conflict resolution
+    # -----------------------------------------------------------------------
+
+    def _resolve_conflict(self, me: Mission, conflict: Conflict) -> HopCommand:
+        """Cakisma cozumu — politika cakisma tipine gore degisir:
+
+          PRIORITY_WINNER (her tipte): NORMAL devam.
+
+          VERTEX parked: reroute (engeli atla), yoksa WAIT.
+
+          VERTEX active (ayni next): WAIT — current'ta dur. Reroute YOK
+            (race condition uretiyor), yield YOK (ayni hedef gidiyoruz).
+            *** 90° aci ile yaklasan AGV'ler icin kritik: sonar karsidan
+            gelmeyi gormez. ***
+
+          EDGE_SWAP direct (bitisik): YIELD dene, yoksa WAIT (deadlock).
+
+          EDGE_SWAP future (3-4 hop ileri): REROUTE (cakisma edge'ini
+            blokla), yoksa WAIT.
+        """
+        other = self.missions.get(conflict.agv_b)
+        if other is None:
+            return self._normal_hop(me)
+
+        # 1) Ben oncelikliyim — hemen devam.
+        if self._compute_priority(me, other):
+            return self._normal_hop(me, reason=f"priority over {other.agv_id}")
+
+        # 2) VERTEX cakismasi
+        if conflict.type == ConflictType.VERTEX:
+            if other.state == MissionState.DONE:
+                # Parked → reroute dene
+                alt = self._find_alternative_path(me, other)
+                if alt is not None and len(alt) > 1:
+                    me.path = alt
+                    return self._normal_hop(
+                        me, reason=f"reroute past parked {other.agv_id}",
+                    )
+                return HopCommand(
+                    agv_id=me.agv_id, action=HopAction.WAIT,
+                    from_=me.current,
+                    reason=f"parked {other.agv_id} blocks {me.next_node}",
+                )
+            # Aktif → ayni hedefe gidiyoruz, WAIT (yield/reroute anlamsiz)
+            return HopCommand(
+                agv_id=me.agv_id, action=HopAction.WAIT,
+                from_=me.current,
+                reason=f"yielding {other.agv_id} (both -> {me.next_node})",
+            )
+
+        # 3) EDGE_SWAP — direct (bitisik) vs future (uzak) ayri politika
+        if conflict.type == ConflictType.EDGE_SWAP:
+            if other.current == me.next_node:
+                # Direct head-on → yan park dene
+                yc = self._begin_yield(me, other)
+                if yc is not None:
+                    return yc
+                return HopCommand(
+                    agv_id=me.agv_id, action=HopAction.WAIT,
+                    from_=me.current,
+                    reason=f"head-on {other.agv_id}, no side park",
+                )
+            # Future head-on → cakisma edge'ini bloklayarak reroute
+            edge = conflict.node_or_edge
+            if isinstance(edge, tuple):
+                alt = self._plan_path(
+                    me.current, me.goal, me.agv_id,
+                    blocked_edges={edge},
+                )
+                if alt and len(alt) > 1:
+                    me.path = alt
+                    return self._normal_hop(
+                        me, reason=f"reroute (future head-on {edge[0]}-{edge[1]})",
+                    )
+            return HopCommand(
+                agv_id=me.agv_id, action=HopAction.WAIT,
+                from_=me.current,
+                reason=f"future head-on {other.agv_id}, no detour",
+            )
+
+        # 4) Fallback (beklenmedik conflict tipi)
+        return HopCommand(
+            agv_id=me.agv_id, action=HopAction.WAIT,
+            from_=me.current,
+            reason=f"yielding to {other.agv_id}",
+        )
+
+    def _compute_priority(self, a: Mission, b: Mission) -> bool:
+        """a, b'den oncelikli mi? Cargo > FIFO > ID."""
+        if a.has_cargo != b.has_cargo:
+            return a.has_cargo
+        if a.fifo_order != b.fifo_order:
+            return a.fifo_order < b.fifo_order
+        return a.agv_id < b.agv_id
+
+    def _find_alternative_path(
+        self, me: Mission, other: Mission,
+    ) -> Optional[List[str]]:
+        """me icin: parked rezervasyon + other'in 2-hop ileri planini
+        engelleyerek alternatif yol bul. Mevcut path ile ayni ise None."""
+        blocked_e: Set[Tuple[str, str]] = set()
+        # other'in 2-hop ileri plani: current→next ve next→after edges
+        if other.current and other.next_node:
+            blocked_e.add(edge_key(other.current, other.next_node))
+        if other.next_node and other.after_node:
+            blocked_e.add(edge_key(other.next_node, other.after_node))
+        # Parked dahil baska AGV'lerin next_node'larini blokla
+        extra_nodes: Set[str] = set()
+        if other.current and other.next_node:
+            extra_nodes.add(other.next_node)
+        blocked_n = self._parked_blocked_nodes_for(me.agv_id) | extra_nodes
+
+        path = self.graph.astar(
+            me.current, me.goal,
+            blocked_nodes=blocked_n,
+            blocked_edges=blocked_e,
+        )
+        if path is None or len(path) < 2:
+            return None
+        # Mevcut path ile ayni mi?
+        if me.pos in me.path:
+            remaining = me.path[me.path.index(me.pos):]
+            if path == remaining:
+                return None
+        return path
+
+    # -----------------------------------------------------------------------
+    # Yield (yan park)
+    # -----------------------------------------------------------------------
+
+    def _find_side_park(
+        self, me: Mission, other: Mission,
+    ) -> Optional[str]:
+        """me.current'a komsu, yan park icin uygun bir node bul.
+
+        Filtreler:
+          - other.current/next/after degil ve other'in path'inde degil
+          - baska AGV tarafindan rezerve degil
+          - me.next_node degil (zaten oraya gidemiyoruz cakismadan)
+        Tercih: dusuk degree once (pendant ozellikle iyi — kimse oraya
+        gitmek istemez)."""
+        if not me.current:
+            return None
+        neighbors = [n for n, _ in self.graph.neighbors(me.current)]
+        if not neighbors:
+            return None
+
+        # other'in tum onumuzdeki path'i
+        other_path: Set[str] = set()
+        if other.pos in other.path:
+            idx = other.path.index(other.pos)
+            other_path = set(other.path[idx:])
+        for n in (other.current, other.next_node, other.after_node):
+            if n:
+                other_path.add(n)
+
+        blocked = self.reservations.blocked_nodes_for(me.agv_id)
+
+        candidates: List[Tuple[int, str]] = []
+        for n in neighbors:
+            if n in other_path or n in blocked or n == me.next_node:
+                continue
+            degree = len(self.graph.neighbors(n))
+            candidates.append((degree, n))
+
+        if not candidates:
+            return None
+        candidates.sort()
+        return candidates[0][1]
+
+    def _begin_yield(
+        self, me: Mission, other: Mission,
+    ) -> Optional[HopCommand]:
+        """me'yi yan parka yolla. Side park bulamazsa None (caller WAIT'e dusurur)."""
+        park = self._find_side_park(me, other)
+        if park is None:
+            return None
+        me.state             = MissionState.YIELDING
+        me.yield_to          = other.agv_id
+        me.yield_park_node   = park
+        me.yield_return_node = me.current
+        # Rezervasyon: current bos, park + edge tutulu
+        if self.reservations.node_owner.get(me.current) == me.agv_id:
+            del self.reservations.node_owner[me.current]
+        self.reservations.reserve_node(park, me.agv_id)
+        self.reservations.reserve_edge(me.current, park, me.agv_id)
+        return HopCommand(
+            agv_id = me.agv_id,
+            action = HopAction.YIELD,
+            from_  = me.current,
+            next_  = park,
+            after_ = None,
+            reason = f"side park for {other.agv_id}",
+        )
+
+    def _plan_yield_step(self, m: Mission) -> HopCommand:
+        """YIELDING state'te her tick:
+          - Henuz parka varilmadi → WAIT
+          - Park'a varildi + diger AGV gecti → return dispatch
+          - Park'a varildi + henuz gecmedi → WAIT
+        """
+        park = m.yield_park_node
+        ret  = m.yield_return_node
+        other = self.missions.get(m.yield_to) if m.yield_to else None
+
+        if park is None or ret is None:
+            return HopCommand(
+                agv_id=m.agv_id, action=HopAction.WAIT,
+                from_=m.current, reason="yield state corrupt",
+            )
+
+        if m.pos != park:
+            return HopCommand(
+                agv_id=m.agv_id, action=HopAction.WAIT,
+                from_=m.current, reason="yield enroute to park",
+            )
+
+        # Diger AGV gecti mi?
+        if not self._is_other_clear_of(other, ret):
+            return HopCommand(
+                agv_id=m.agv_id, action=HopAction.WAIT,
+                from_=m.current,
+                reason=f"yield waiting {m.yield_to} to clear {ret}",
+            )
+
+        return self._return_from_yield(m)
+
+    def _is_other_clear_of(
+        self, other: Optional[Mission], node: str,
+    ) -> bool:
+        """other AGV node'dan uzaklasti mi? other yoksa veya is_done ise clear."""
+        if other is None or other.is_done:
+            return True
+        if other.current == node:        # hala orada
+            return False
+        if other.next_node == node:      # oraya geliyor
+            return False
+        # other'in kalan path'i node'dan geciyor mu?
+        if node in other.path and other.pos in other.path:
+            idx = other.path.index(other.pos)
+            if node in other.path[idx:]:
+                return False
+        return True
+
+    def _return_from_yield(self, m: Mission) -> HopCommand:
+        """Yield bitti — park'tan return_node'a don, state temizle.
+        Sonraki tick normal _plan_hop calisir."""
+        park = m.pos
+        ret  = m.yield_return_node or m.start
+        # Park release, return reserve
+        if self.reservations.node_owner.get(park) == m.agv_id:
+            del self.reservations.node_owner[park]
+        self.reservations.reserve_node(ret, m.agv_id)
+        self.reservations.reserve_edge(park, ret, m.agv_id)
+        # State temizle — return hop tamamlaninca normal akisa donecek
+        m.state             = MissionState.ACTIVE
+        m.yield_to          = None
+        m.yield_park_node   = None
+        m.yield_return_node = None
+        return HopCommand(
+            agv_id = m.agv_id,
+            action = HopAction.NORMAL,
+            from_  = park,
+            next_  = ret,
+            after_ = None,
+            reason = "yield return",
+        )
+
+
+# =============================================================================
+# FleetSimulator — test/dev icin tick executor
+# =============================================================================
+
+class FleetSimulator:
+    """Planner.tick() ciktisini alip AGV'lere uygular. Test ve UI simulasyonu
+    icin; production'da bu rolu WS executor (PC→AGV setHop) ustlenir."""
+
+    def __init__(self, planner: FleetPlanner):
+        self.planner:     FleetPlanner                 = planner
+        self.tick_no:     int                          = 0
+        self.history:     List[Tuple[int, str, HopCommand]] = []
+        self.wait_streak: Dict[str, int]               = {}
+
+    def step(self) -> Dict[str, HopCommand]:
+        cmds = self.planner.tick()
+        self.tick_no += 1
+        for agv, cmd in cmds.items():
+            self.history.append((self.tick_no, agv, cmd))
+            if cmd.action in (HopAction.NORMAL, HopAction.YIELD) and cmd.next_:
+                self.planner.on_hop_complete(agv, cmd.next_)
+                self.wait_streak[agv] = 0
+            elif cmd.action == HopAction.WAIT:
+                self.wait_streak[agv] = self.wait_streak.get(agv, 0) + 1
+            else:   # DONE
+                self.wait_streak[agv] = 0
+        return cmds
+
+    def run_until_done(
+        self,
+        max_ticks:      int = 100,
+        deadlock_ticks: int = 5,
+        verbose:        bool = False,
+    ) -> str:
+        """Tum missionlar bitene/deadlock olana kadar kos.
+        Donus: 'done' | 'deadlock' | 'timeout'."""
+        for _ in range(max_ticks):
+            cmds = self.step()
+            if verbose:
+                for agv, c in cmds.items():
+                    print(f"    t={self.tick_no:02d} {c}")
+            if not cmds:
+                return "done"
+            if all(c.action == HopAction.DONE for c in cmds.values()):
+                return "done"
+            active = [a for a, c in cmds.items() if c.action != HopAction.DONE]
+            if active and all(
+                self.wait_streak.get(a, 0) >= deadlock_ticks for a in active
+            ):
+                return "deadlock"
+        return "timeout"
