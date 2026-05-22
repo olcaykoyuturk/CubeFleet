@@ -46,9 +46,8 @@ void setup() {
 }
 
 void loop() {
-    updateSonar();      // HC-SR04 periyodik ölçüm (SONAR_INTERVAL ms)
-    webSocketLoop();    // Gelen komutları işle, durum gönder
-    runNavigation();    // Navigasyon state machine'i çalıştır
-    oledUpdate();       // OLED ekran güncelle (OLED_INTERVAL ms'de bir)
-    printDebugInfo();   // Serial debug çıktısı (DEBUG_INTERVAL ms'de bir)
+    updateSonar();
+    webSocketLoop();
+    runNavigation();
+    oledUpdate();
 }

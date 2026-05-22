@@ -66,7 +66,4 @@
 #define LINE_SEARCH_MS 1200    // Çizgi arama süresi (ms)
 
 // ===== Yol Bulma =====
-#define MAX_PATH_LENGTH  20    // BFS yolunun maksimum uzunluğu
-
-// ===== Debug =====
-#define DEBUG_INTERVAL   100   // Serial debug çıktı aralığı (ms)
+#define MAX_PATH_LENGTH  20    // setHop path buffer (from + next + after)

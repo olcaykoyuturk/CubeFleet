@@ -2575,7 +2575,8 @@ class AGVControlApp(ctk.CTk):
                     s: AGVState = payload
                     if s.id:
                         prev = self.agvs.get(s.id)
-                        prev_wp = prev.currentWaypoint if prev else None
+                        prev_wp        = prev.currentWaypoint if prev else None
+                        prev_connected = prev.connected if prev else None
                         self.agvs[s.id] = s
                         self._check_auto_apply(s)
                         need_list_refresh   = True
@@ -2593,10 +2594,33 @@ class AGVControlApp(ctk.CTk):
                                         f"(navState={s.navState})",
                                 time_ms=0, wall_time=time.time(),
                             ))
+                        # Connect/disconnect gecisi → planner'a bildir.
+                        # Disconnect'te mission + rezervasyonlar korunur,
+                        # son pos diger AGV'ler icin engel sayilir.
+                        # Reconnect'te dispatch tekrar baslar (drift correction
+                        # asagidaki on_agv_position ile pos senkronlar).
+                        if prev_connected != s.connected:
+                            self.fleet_planner.set_agv_connected(
+                                s.id, s.connected, s.currentWaypoint or None,
+                            )
+                            self._add_log(LogEvent(
+                                agvId=s.id,
+                                message=f"[PLN] {s.id} "
+                                        f"{'BAGLANDI' if s.connected else 'KOPTU'}"
+                                        f" (pos={s.currentWaypoint or '-'})",
+                                time_ms=0, wall_time=time.time(),
+                            ))
+                            # Reconnect ise: bir sonraki tick'te dispatch
+                            # tekrar baslar, mission devam eder.
+                            if s.connected:
+                                self._planner_tick_and_dispatch()
                         # Planner drift correction: AGV gercek pozisyonu planner'in
-                        # bildiginden farkliysa senkronla.
-                        if s.currentWaypoint:
+                        # bildiginden farkliysa senkronla. (Connected AGV'ler icin.)
+                        if s.connected and s.currentWaypoint:
                             self._planner_on_agv_position(s.id, s.currentWaypoint)
+                            # last_known_pos da guncellensin (disconnect aninda
+                            # son guncel pos kullanilsin diye)
+                            self.fleet_planner.last_known_pos[s.id] = s.currentWaypoint
                 elif kind == "hop_complete":
                     ev = payload   # HopCompleteEvent
                     # DEBUG TIMING: WS thread'inde ev.wall_time set edildi.

@@ -255,18 +255,8 @@ static void searchForLine() {
 // Kavşak İşleyici
 // =============================================================================
 
-// Yolu logla (yardımcı)
-static void logPath(const char* prefix) {
-    char buf[MAX_PATH_LENGTH * 2 + 32];
-    snprintf(buf, sizeof(buf), "%s", prefix);
-    int len = strlen(buf);
-    for (int i = 0; i < navPathLength && len < (int)sizeof(buf) - 3; i++) {
-        buf[len++] = navPath[i];
-        if (i < navPathLength - 1) buf[len++] = '>';
-    }
-    buf[len] = 0;
-    sendLog(buf);
-}
+// Yolu logla yardimcisi setTarget ile birlikte kaldirildi — setHop kendi
+// detayli log mesajini icerir.
 
 static void handleJunction() {
     // 1. RFID konumunu uygula
@@ -331,26 +321,19 @@ static void handleJunction() {
     char nextWP = navPath[navPathIndex];
     Heading targetDir;
     if (!getDirection(currentWaypoint, nextWP, &targetDir)) {
-        // Beklenmedik node — re-path
-        char rbuf[64];
-        snprintf(rbuf, sizeof(rbuf), "Beklenmedik node %c! Re-path: %c->%c",
-                 currentWaypoint, currentWaypoint, targetWaypoint);
+        // Beklenmedik kart — PC drift correction devreye girip yeni setHop
+        // gonderene kadar dur.
+        char rbuf[80];
+        snprintf(rbuf, sizeof(rbuf),
+                 "Beklenmedik node %c (next=%c): PC'ye bildirildi, IDLE",
+                 currentWaypoint, nextWP);
         sendLog(rbuf);
-
-        if (!findPath(currentWaypoint, targetWaypoint, navPath, &navPathLength)
-            || navPathLength < 2) {
-            sendLog("Re-path basarisiz! Duruluyor.");
-            navState = NAV_IDLE;
-            return;
-        }
-        navPathIndex = 1;
-        nextWP = navPath[1];
-        if (!getDirection(currentWaypoint, nextWP, &targetDir)) {
-            sendLog("Re-path yon bulunamadi! Duruluyor.");
-            navState = NAV_IDLE;
-            return;
-        }
-        logPath("Yeni yol: ");
+        motorStop();
+        navState      = NAV_IDLE;
+        isTarget      = false;
+        navPathIndex  = 0;
+        navPathLength = 0;
+        return;
     }
 
     char buf[48];
@@ -532,34 +515,6 @@ void navCommandSetPosition(char waypoint) {
     sendLog(buf);
 }
 
-void navCommandSetTarget(char waypoint) {
-    if (currentWaypoint == 0) {
-        sendLog("Hata: Once konumu ayarlayin (setPosition)!");
-        return;
-    }
-
-    targetWaypoint = waypoint;
-
-    if (!findPath(currentWaypoint, targetWaypoint, navPath, &navPathLength)) {
-        char buf[48];
-        sprintf(buf, "Hata: %c->%c yolu bulunamadi!", currentWaypoint, waypoint);
-        sendLog(buf);
-        return;
-    }
-
-    isTarget           = true;
-    nav.lastReadWP     = currentWaypoint;   // Başlangıç kartı tekrar tetiklemesin
-    nav.rfidDetectedWP = 0;
-
-    logPath("Yol: ");
-
-    if (calibData.isCalibrated) {
-        navState = NAV_TURNING;
-    } else {
-        sendLog("Hedef alindi. Kalibrasyon yapinca Baslat'a basin.");
-    }
-}
-
 void navCommandStart() {
     if (!calibData.isCalibrated) { sendLog("Hata: Kalibrasyon gerekli!"); return; }
     if (!isTarget)               { sendLog("Hata: Hedef belirlenmedi!");  return; }
@@ -733,12 +688,8 @@ void navCommandHop(char from, char next, char after, char goal) {
         return;
     }
 
-    // Tam yeni hop. navPath[0]=current (just arrived), navPath[1]=hedef.
-    // navPathIndex = 1 → "sonraki hedef" konvansiyonu (navPath[navPathIndex]
-    // = hedef node). Eskiden 0'di → handleJunction wait-loop'tan sonra
-    // navPath[0]=currentWaypoint olunca getDirection(C,C) invalid → firmware
-    // re-path tetikleniyor, PC'nin reroute'unu eziyordu. handleTurning'in
-    // initial IDLE→start akisinda da navPathIndex=1 set ediliyor, idempotent.
+    // Fresh full hop. navPath[0]=current, navPath[1]=hedef.
+    // navPathIndex=1 (sonraki hedef konvansiyonu — handleTurning idempotent).
     navPath[0]    = from;
     navPath[1]    = next;
     navPathLength = 2;

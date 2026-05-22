@@ -67,12 +67,8 @@ static void handleServerMessage(uint8_t* payload, size_t length) {
         return;
     }
 
-    // --- Hedef ---
-    if (strcmp(type, "setTarget") == 0) {
-        const char* wp = doc["waypoint"];
-        if (wp && wp[0]) navCommandSetTarget(wp[0]);
-        return;
-    }
+    // (setTarget kaldirildi — path planning PC'de yapiliyor, PC setHop ile
+    // 2-hop emir gonderir. setTarget gelirse sessizce yoksay.)
 
     // --- PID ayarı ---
     if (strcmp(type, "setPID") == 0) {

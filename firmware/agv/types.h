@@ -100,7 +100,6 @@ void readCalibratedSensors();
 void calibrationInit();
 void updateCalibrationValues();
 void runManualCalibration();
-void printCalibrationData();
 
 // --- line_Pos.ino ---
 int  calculateLinePosition();
@@ -121,7 +120,6 @@ void runNavigation();
 const char* getHeadingName();
 
 // --- navigation.ino: Komut arayüzü ---
-void navCommandSetTarget(char waypoint);
 void navCommandSetPosition(char waypoint);
 void navCommandStart();
 void navCommandStop();
@@ -134,8 +132,7 @@ bool navCommandApplyCalibration(const int* minVals, const int* maxVals);
 // goal = mission nihai hedefi (REACHED check icin). goal=0 ise after kullanilir.
 void navCommandHop(char from, char next, char after, char goal = 0);
 
-// --- pathfinder.ino ---
-bool findPath(char from, char to, char* path, int* pathLength);
+// --- pathfinder.ino — sadece harita lookup (BFS kaldirildi, path PC'de) ---
 bool getDirection(char from, char to, Heading* dir);
 
 // --- websocket.ino ---
@@ -162,7 +159,6 @@ bool readRFIDWaypointFast(char* waypoint);   // non-blocking, NAV_FOLLOWING içi
 
 // --- debug.ino ---
 void debugInit();
-void printDebugInfo();
 
 // --- oled.ino ---
 void oledInit();

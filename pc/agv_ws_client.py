@@ -7,11 +7,14 @@ UI thread'inden surekli `pop_events()` ile yeni olaylari al ve uygula.
 Server protokolu (firmware/server/server.ino):
     PC -> Server:
         {type: "setPosition",      agvId: "AGV_1", waypoint: "A"}
-        {type: "setTarget",        agvId: "AGV_1", waypoint: "H"}
+        {type: "setHop",           agvId: "AGV_1", from: "A", next: "B",
+                                   after: "E", goal: "I"}    # 2-hop emir
+        {type: "clearMission",     agvId: "AGV_1"}
         {type: "setPID",           agvId: "AGV_1", Kp: 0.012, Ki: 0, Kd: 0.005}
         {type: "setSpeed",         agvId: "AGV_1", speed: 35}
         {type: "command",          agvId: "AGV_1", command: "start|stop|calibrate"}
         {type: "applyCalibration", agvId: "AGV_1", sensorMin: [...8], sensorMax: [...8]}
+        {type: "pcHeartbeat"}      # her 1.5sn (firmware AGV disconnect tespiti)
         {type: "getList"}
 
     Server -> PC:
@@ -153,12 +156,9 @@ class AGVClient:
         # send_raw UI thread'inden, websocket-client'in kendi ping thread'i ile
         # ayni socket'e yazma yarisina girebilir. Lock ile serialize et.
         self._send_lock = threading.Lock()
-        # DEBUG TIMING: True olursa her in/out WS mesaji icin ("ws_debug", str)
-        # event'i kuyruga atilir. UI log paneline yansir. Kapaliyken sifir overhead.
+        # debug_timing=True iken her WS mesaji "ws_debug" event olarak kuyruga
+        # girer; UI log paneline yansir. Kapaliyken sifir overhead.
         self.debug_timing = False
-        # Son N gonderim icin (type, agvId, wall_time) tuple — latency hesabinda
-        # kullanilabilir. ws_debug aktifken doldurulur.
-        self._send_log: List[tuple] = []
 
     # -------------------------------------------------------------------------
     # Yasam dongusu
@@ -358,9 +358,7 @@ class AGVClient:
     # Komut yardimcilari
     def set_position(self, agv_id: str, waypoint: str) -> bool:
         return self.send_raw({"type": "setPosition", "agvId": agv_id, "waypoint": waypoint})
-
-    def set_target(self, agv_id: str, waypoint: str) -> bool:
-        return self.send_raw({"type": "setTarget", "agvId": agv_id, "waypoint": waypoint})
+    # (set_target kaldirildi — path planning PC planner'da, set_hop kullanilir.)
 
     def set_pid(self, agv_id: str, kp: float, ki: float, kd: float) -> bool:
         return self.send_raw({
@@ -369,7 +367,7 @@ class AGVClient:
         })
 
     def set_speed(self, agv_id: str, speed: int) -> bool:
-        return self.send_raw({"type": "setSpeed", "agvId": agv_id, "speed": int(speed)})
+        return self.send_raw({"type": "setSpeed", "agvId": agv_id, "speed": speed})
 
     def command(self, agv_id: str, cmd: str) -> bool:
         # cmd: "start" | "stop" | "calibrate"

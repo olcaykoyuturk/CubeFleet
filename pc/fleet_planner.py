@@ -1,31 +1,30 @@
 """
 Fleet Planner — Multi-AGV koordinasyon.
 
-Tasarim ilkeleri:
-  - 2-hop look-ahead: AGV'ye `setHop {from, next, after, goal}` gonderilir.
-    Continuous hop: `sameHop` branch (after guncelle) AGV durmadan ilerler.
-  - Soft reservations: A* path planning sadece parked (DONE) AGV'leri block
-    sayar. Aktif AGV'lerin transient (1-2 sn) node rezervasyonlari A*'i uzun
-    yollara zorlamaz → AGV'ler paralel hareket eder.
-  - Cakisma cozumu conflict-detect katmaninda yapilir:
-      VERTEX active (ayni next) → loser WAIT
-      VERTEX parked → reroute, yoksa WAIT
-      EDGE_SWAP direct → loser YIELD (yan park) veya WAIT
-      EDGE_SWAP future (path overlap 3-4 hop) → reroute (edge blokla), yoksa WAIT
-  - Path planning'in disinda guvenlik katmani: AGV firmware race guard
-    (FOLLOWING/TURNING'de yeni hop reddet) + sonar 10cm STOP / 20cm SLOW.
-  - AGV pos planner path'inden saparsa on_hop_complete otomatik replan tetikler.
-
-JSON formati (pc/waypoints.json):
-    {"nodes": {"A": {"x": 0, "y": 0}, ...},
-     "edges": [{"from": "A", "to": "B", "cost": 20}, ...]}
+Tasarim:
+  - 2-hop look-ahead emir: setHop {from, next, after, goal}. `sameHop`
+    branch ile AGV junction'da durmadan ilerler.
+  - Soft reservations: A* sadece DONE/disconnected AGV'leri block sayar;
+    aktif transient rezervasyonlar A*'i bozmaz, paralel hareket korunur.
+  - Cakisma cozumu:
+      VERTEX active   loser WAIT
+      VERTEX parked   reroute -> WAIT
+      EDGE_SWAP direct YIELD (yan park) -> WAIT
+      EDGE_SWAP future (3-4 hop) reroute -> WAIT
+  - Guvenlik katmanlari: firmware race guard (FOLLOWING/TURNING'de hop
+    reddi) + sonar 10cm STOP / 20cm SLOW.
 
 API:
     p = FleetPlanner(graph)
     p.add_mission(agv_id, goal, start=..., has_cargo=False)
-    p.on_hop_complete(agv_id, new_node)   # AGV hopComplete event'inden
-    p.set_agv_position(agv_id, node)      # manuel/drift correction
+    p.on_hop_complete(agv_id, new_node)
+    p.set_agv_position(agv_id, node)
+    p.set_agv_connected(agv_id, connected, current_pos=None)
     cmds = p.tick()                       # Dict[agv_id, HopCommand]
+
+waypoints.json formati:
+    {"nodes": {"A": {"x": 0, "y": 0}, ...},
+     "edges": [{"from": "A", "to": "B", "cost": 20}, ...]}
 """
 
 from __future__ import annotations
@@ -187,18 +186,18 @@ class FleetPlanner:
         self.queued:             List[Mission]      = []
         self._mission_id_counter = 0
         self._fifo_counter       = 0
+        # Disconnect persistence: kopuk AGV tick'te dispatch edilmez, pos
+        # diger AGV'ler icin engel sayilir.
+        self.disconnected_agvs: Set[str] = set()
+        self.last_known_pos:    Dict[str, str] = {}
 
     # -----------------------------------------------------------------------
     # Path planning helpers
     # -----------------------------------------------------------------------
 
     def _parked_blocked_nodes_for(self, agv_id: str) -> Set[str]:
-        """SADECE DONE state'teki AGV'lerin tuttugu node'lari donder.
-        Path planning'de kullanilir: aktif AGV'lerin transient (1-2 sn omurlu)
-        rezervasyonlari A*'i uzun yollara zorlamasin.
-
-        Aktif rezervasyonlar conflict-detect katmaninda (VERTEX/EDGE_SWAP)
-        yonetilir; orada VERTEX active = WAIT veya YIELD."""
+        """Path planning hard-block: parked (DONE) + disconnected AGV pos'lari.
+        Aktif AGV transient rezervasyonlari conflict-detect katmaninda yonetilir."""
         blocked: Set[str] = set()
         for n, owner in self.reservations.node_owner.items():
             if owner == agv_id:
@@ -206,7 +205,32 @@ class FleetPlanner:
             owner_m = self.missions.get(owner)
             if owner_m is not None and owner_m.state == MissionState.DONE:
                 blocked.add(n)
+        for other_id in self.disconnected_agvs:
+            if other_id == agv_id:
+                continue
+            pos = self.last_known_pos.get(other_id)
+            if pos:
+                blocked.add(pos)
         return blocked
+
+    # -----------------------------------------------------------------------
+    # Connection state — WS persistence
+    # -----------------------------------------------------------------------
+
+    def set_agv_connected(self, agv_id: str, connected: bool,
+                          current_pos: Optional[str] = None) -> None:
+        """Bagli/kopuk gecisini bildir. Disconnect mission'i silmez, sadece
+        dispatch'i durdurur ve son pos'u engel sayar."""
+        if connected:
+            self.disconnected_agvs.discard(agv_id)
+            if current_pos:
+                self.last_known_pos[agv_id] = current_pos
+        else:
+            self.disconnected_agvs.add(agv_id)
+            if current_pos:
+                self.last_known_pos[agv_id] = current_pos
+            elif agv_id in self.missions:
+                self.last_known_pos[agv_id] = self.missions[agv_id].pos
 
     def _plan_path(
         self,
@@ -342,15 +366,17 @@ class FleetPlanner:
     # -----------------------------------------------------------------------
 
     def tick(self) -> Dict[str, HopCommand]:
-        """Her aktif AGV icin HopCommand uretir."""
+        """Her aktif AGV icin HopCommand uretir. Disconnected AGV'ler
+        skip edilir — mission frozen, dispatch yok (WS yok)."""
         commands: Dict[str, HopCommand] = {}
         for m in self._prioritize_missions():
             commands[m.agv_id] = self._plan_hop(m)
         return commands
 
     def _prioritize_missions(self) -> List[Mission]:
-        """Cargo > FIFO > ID. Sadece aktif (is_done olmayan)."""
-        active = [m for m in self.missions.values() if not m.is_done]
+        """Cargo > FIFO > ID. Disconnected ve is_done atlanir."""
+        active = [m for m in self.missions.values()
+                  if not m.is_done and m.agv_id not in self.disconnected_agvs]
         return sorted(
             active,
             key=lambda m: (not m.has_cargo, m.fifo_order, m.agv_id),
@@ -400,16 +426,14 @@ class FleetPlanner:
         return self._normal_hop(m)
 
     def _normal_hop(self, m: Mission, reason: str = "normal") -> HopCommand:
-        """Normal hop: AGV current'tan ayrilma emri verildi. Current node'u
-        BIRAK (diger AGV'ler oraya planlama yapabilir, sonar fiziksel mesafe
-        korur). next_node + edge'i reserve et."""
+        """Dispatch hop emri: current release + next/edge reserve.
+        Paralel akis icin current dispatch aninda birakilir, fiziksel mesafe
+        sonar ile korunur."""
         if m.next_node is None:
             return HopCommand(
                 agv_id=m.agv_id, action=HopAction.WAIT,
                 from_=m.current, reason="no next",
             )
-        # Current release — AGV oradan ayriliyor. Diger AGV'ler current'a
-        # planlama yapabilsin (paralel akış); fiziksel mesafe sonar'la korunur.
         if self.reservations.node_owner.get(m.current) == m.agv_id:
             del self.reservations.node_owner[m.current]
         self.reservations.reserve_node(m.next_node, m.agv_id)
@@ -455,11 +479,8 @@ class FleetPlanner:
             if other.is_done:
                 continue
 
-            # VERTEX: me.next, other'in next+after'inda mi?
-            # Sadece "next" karsilastirmak race uretir (eski log 03:18:58):
-            # AGV_2 B>E dispatch, o an AGV_1 H'ye gidiyor, AGV_1.after=E.
-            # AGV_2 yola cikinca AGV_1 H'ye varir, NOW conflict gec yakalan
-            # → 90° carpisma. after'a bakarak BASLAMADAN once yakalan.
+            # VERTEX: me.next == other'in next veya after'inda. after'a bakmak
+            # 90° yaklasimda gec-detect/carpisma riskini onler.
             other_future = {n for n in (other.next_node, other.after_node) if n}
             if me.next_node in other_future:
                 return Conflict(
@@ -476,11 +497,8 @@ class FleetPlanner:
                     detail=f"head-on {me.current}-{me.next_node}",
                 )
 
-            # EDGE_SWAP future: path overlap 3-4 hop ileride ters yonde.
-            # Ornek bug (03:27:30): AGV_1 C-F-I-H-G (I→H) vs AGV_2 A-B-E-H-I
-            # (H→I). Direct EDGE_SWAP bunu kaciriyor (3 hop uzakta) →
-            # continuous-after ile her ikisi de I-H edge'inde bulusur. k=4
-            # lookahead ile baslamadan once yakalanir.
+            # EDGE_SWAP future: path'ler 3-4 hop ileride ayni edge'i ters yon
+            # kullaniyorsa continuous-after ile orada bulusurlar — onceden yakala.
             headon = self._find_path_headon(me, other, lookahead=4)
             if headon:
                 return Conflict(
@@ -523,21 +541,12 @@ class FleetPlanner:
     # -----------------------------------------------------------------------
 
     def _resolve_conflict(self, me: Mission, conflict: Conflict) -> HopCommand:
-        """Cakisma cozumu — politika cakisma tipine gore degisir:
-
-          PRIORITY_WINNER (her tipte): NORMAL devam.
-
-          VERTEX parked: reroute (engeli atla), yoksa WAIT.
-
-          VERTEX active (ayni next): WAIT — current'ta dur. Reroute YOK
-            (race condition uretiyor), yield YOK (ayni hedef gidiyoruz).
-            *** 90° aci ile yaklasan AGV'ler icin kritik: sonar karsidan
-            gelmeyi gormez. ***
-
-          EDGE_SWAP direct (bitisik): YIELD dene, yoksa WAIT (deadlock).
-
-          EDGE_SWAP future (3-4 hop ileri): REROUTE (cakisma edge'ini
-            blokla), yoksa WAIT.
+        """Cozum politikasi (cakisma tipine gore):
+          priority winner    -> NORMAL
+          VERTEX parked      -> reroute, yoksa WAIT
+          VERTEX active      -> WAIT (90° carpisma korumasi)
+          EDGE_SWAP direct   -> YIELD, yoksa WAIT
+          EDGE_SWAP future   -> REROUTE (cakisma edge blokli), yoksa WAIT
         """
         other = self.missions.get(conflict.agv_b)
         if other is None:

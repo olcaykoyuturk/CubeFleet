@@ -60,6 +60,3 @@ void runManualCalibration() {
     }
 }
 
-void printCalibrationData() {
-    // Debug çıktısı kaldırıldı
-}

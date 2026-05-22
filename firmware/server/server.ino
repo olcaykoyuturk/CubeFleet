@@ -296,22 +296,8 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
             broadcastLog(agvId, "Konum ayarlandi: " + waypoint);
         }
     }
-    else if (type == "setTarget") {
-        String agvId = doc["agvId"].as<String>();
-        String waypoint = doc["waypoint"].as<String>();
-
-        int idx = findAGVById(agvId);
-        if (idx >= 0 && agvs[idx].connected) {
-            StaticJsonDocument<128> cmd;
-            cmd["type"]     = "setTarget";
-            cmd["waypoint"] = waypoint;
-            String cmdStr;
-            serializeJson(cmd, cmdStr);
-            ws.text(agvs[idx].clientId, cmdStr);
-            Serial.printf("Hedef gonderildi %s: %s\n", agvId.c_str(), waypoint.c_str());
-            broadcastLog(agvId, "Hedef ayarlandi: " + waypoint);
-        }
-    }
+    // setTarget kaldirildi: path planning PC tarafinda (fleet_planner),
+    // 2-hop emir setHop ile gonderilir. PC istemcisi de bu komutu uretmiyor.
     else if (type == "setPID") {
         String agvId = doc["agvId"].as<String>();
         float Kp = doc["Kp"] | 0.0;
