@@ -111,10 +111,9 @@ uint8_t getFlashLedBrightness() {
 }
 
 void setup() {
-    // NOT: Serial.begin cagrilmiyor — UART0 peripheral'i init edilmez, GPIO 3
-    // (UART RX) serbest kalir ve grip sensoru (mikroswitch) icin
-    // INPUT_PULLUP olarak kullanilabilir. Tum runtime log akisi camLog
-    // ring buffer + /poll endpoint uzerinden PC log paneline gider.
+    // Serial.begin yok — GPIO 3 (UART RX) grip mikroswitch icin lazim,
+    // UART peripheral'i pini sahiplenmesin. Log akisi camLog ring buffer
+    // + /poll endpoint ile PC'ye gider.
     delay(500);
 
     pinMode(BOARD_LED_PIN, OUTPUT);

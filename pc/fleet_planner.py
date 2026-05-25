@@ -39,10 +39,6 @@ except ModuleNotFoundError:
     from pc.graph import Graph, edge_key    # module: from pc.fleet_planner import ...
 
 
-# =============================================================================
-# Enums
-# =============================================================================
-
 class MissionState(Enum):
     QUEUED   = "queued"
     ACTIVE   = "active"
@@ -62,10 +58,6 @@ class ConflictType(Enum):
     EDGE_SWAP = "edge_swap"   # head-on: bitisik (A→B vs B→A) veya future path overlap
     NONE      = "none"
 
-
-# =============================================================================
-# Veri yapilari
-# =============================================================================
 
 @dataclass
 class Mission:
@@ -136,10 +128,6 @@ class Conflict:
     detail:       str = ""
 
 
-# =============================================================================
-# Reservation table
-# =============================================================================
-
 @dataclass
 class ReservationTable:
     """Aktif AGV'lerin tuttugu node + edge."""
@@ -173,10 +161,6 @@ class ReservationTable:
     def blocked_edges_for(self, agv: str) -> Set[Tuple[str, str]]:
         return {e for e, o in self.edge_owner.items() if o != agv}
 
-
-# =============================================================================
-# Fleet Planner
-# =============================================================================
 
 class FleetPlanner:
     def __init__(self, graph: Graph):
@@ -796,10 +780,6 @@ class FleetPlanner:
             reason = "yield return",
         )
 
-
-# =============================================================================
-# FleetSimulator — test/dev icin tick executor
-# =============================================================================
 
 class FleetSimulator:
     """Planner.tick() ciktisini alip AGV'lere uygular. Test ve UI simulasyonu

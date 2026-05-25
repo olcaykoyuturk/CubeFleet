@@ -37,10 +37,6 @@ from typing import Dict, List, Optional
 import websocket   # websocket-client
 
 
-# =============================================================================
-# AGV durum sinifi
-# =============================================================================
-
 @dataclass
 class AGVState:
     id:              str   = ""
@@ -120,10 +116,6 @@ class HopCompleteEvent:
     time_ms:   int   = 0       # AGV firmware uptime ms (yollarken)
     wall_time: float = 0.0     # PC wall clock (receive zamani)
 
-
-# =============================================================================
-# WebSocket Client
-# =============================================================================
 
 class AGVClient:
     """

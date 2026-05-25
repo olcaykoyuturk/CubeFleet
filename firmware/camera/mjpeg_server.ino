@@ -259,17 +259,10 @@ static void handleReboot() {
     ESP.restart();
 }
 
-// GET /grip-debug - grip sensor diagnostic. Switch ile sorun yasaniyorsa bu
-// endpoint ile ham GPIO durumu, debounce state, son event sira no okunur.
-//   raw_gpio:    digitalRead(GRIP_SENSE_PIN) ham deger (0=LOW, 1=HIGH)
-//   pressed:     active_low yorumu sonrasi "basili mi" (0/1)
-//   stable:      debounce sonrasi stable state (0/1)
-//   pending:     suan bir debounce timer'i calisiyor mu (0/1)
-//   event:       "held" | "lost" | "none"
-//   seq:         son event sira numarasi
+// GET /grip-debug — switch sorun cikariyorsa ham GPIO + debounce state oku
 static void handleGripDebug() {
     int  raw     = armGripRawGpio();
-    bool pressed = (raw == LOW);   // active_low varsayim — config.h ile uyumlu
+    bool pressed = (raw == LOW);
     char buf[224];
     snprintf(buf, sizeof(buf),
         "{\"raw_gpio\":%d,\"pressed\":%d,\"stable\":%d,\"pending\":%d,"

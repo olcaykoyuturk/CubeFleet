@@ -43,11 +43,7 @@ PICKUP_CFG_PATH    = os.path.join(os.path.dirname(__file__), "pickup_config.json
 WAYPOINTS          = list("ABCDEFGHI")
 
 
-# =============================================================================
-# Tema — tek yerden renk/spacing/font sabitleri
-# =============================================================================
-
-# Aksiyon renkleri (Material Design 800/700 tonlari, dark theme uyumlu)
+# Tema — Material Design 800/700 tonlari (dark theme)
 COL_SUCCESS         = "#2e7d32"   # baslat / OK
 COL_SUCCESS_HOVER   = "#1b5e20"
 COL_DANGER          = "#c62828"   # durdur / hata / acil
@@ -78,10 +74,6 @@ PAD_MD = 8
 PAD_LG = 12
 PAD_XL = 16
 
-
-# =============================================================================
-# UI Yardimcilari
-# =============================================================================
 
 def fmt_ago(t_ms: int) -> str:
     """Server'dan gelen millis()'i 'X sn once' gibi gosterir (basit)."""
@@ -140,10 +132,6 @@ class SensorBar(ctk.CTkFrame):
         self.canvas.coords(self._bar, 2, 80 - h, 18, 80)
 
 
-# =============================================================================
-# Ana Uygulama
-# =============================================================================
-
 class AGVControlApp(ctk.CTk):
     # UI tick aralıği — WS event queue'sundan pop + dashboard/sensor refresh.
     # 50ms = 20 Hz, queue_wait ortalaması ~25ms (eski 100ms'de ~50ms idi).
@@ -199,12 +187,10 @@ class AGVControlApp(ctk.CTk):
         self.arm_led_vars:    Dict[str, ctk.IntVar]      = {}
         self.arm_led_lbls:    Dict[str, ctk.CTkLabel]    = {}
 
-        # YOLO tespit — per-AGV toggle (BooleanVar). Detector singleton (detector.py).
-        # AGV'lerin ayni CAM modeline baglanmasi gerekmez; her biri kendi frame'i
-        # uzerinde inference yapar, ortak model agirligini paylasir.
+        # YOLO tespit toggle — detector singleton paylasilir (detector.py)
         self.detect_vars:     Dict[str, ctk.BooleanVar]  = {}
-        self.detect_last_ms:  Dict[str, float]           = {}   # son inference suresi
-        self.detect_last_n:   Dict[str, int]             = {}   # son frame'de tespit sayisi
+        self.detect_last_ms:  Dict[str, float]           = {}
+        self.detect_last_n:   Dict[str, int]             = {}
 
         # Görünüm modu: dual (varsayılan) = iki AGV yan yana, single = aktif olan büyük
         self.arm_view_mode:   str  = "dual"   # "dual" | "single"
@@ -786,9 +772,6 @@ class AGVControlApp(ctk.CTk):
                       command=lambda: self._arm_fetch_state(agv_id),
                       font=self.font_small).pack(side="left", padx=2)
 
-        # YOLO tespit toggle — checkbox aktifken _process_camera inference yapar
-        # ve frame'e bbox + merkez overlay basar. Sag tarafta inference suresi (ms)
-        # + son frame'deki tespit sayisi gosterilir.
         det_row = ctk.CTkFrame(card, fg_color="transparent")
         det_row.pack(fill="x", padx=8, pady=(0, 8))
         ctk.CTkCheckBox(det_row, text="🎯 Tespit (YOLO)",
@@ -904,7 +887,7 @@ class AGVControlApp(ctk.CTk):
         def worker():
             try:
                 with urllib.request.urlopen(url, timeout=2.0) as r:
-                    _ = r.read()
+                    r.read()
             except Exception as e:
                 self.after(0, lambda: self._set_status(
                     f"{agv_id} kol HTTP hata: {e}", err=True))
@@ -2455,7 +2438,6 @@ class AGVControlApp(ctk.CTk):
                 self.cam_last_count[agv_id] = count
                 self.cam_last_time[agv_id]  = now
 
-            # YOLO tespit (checkbox aktifse) — frame'i in-place modify et
             if self.detect_vars.get(agv_id) and self.detect_vars[agv_id].get():
                 det = get_detector()
                 dets = det.detect(frame)
@@ -2832,10 +2814,6 @@ class AGVControlApp(ctk.CTk):
                 msg += f" — {detail}"
             self._set_status_color(msg, COL_DANGER)
 
-
-# =============================================================================
-# Entry
-# =============================================================================
 
 if __name__ == "__main__":
     AGVControlApp().mainloop()

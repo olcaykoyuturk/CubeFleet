@@ -130,10 +130,8 @@ void armInit() {
     digitalWrite(MAGNET_PIN, LOW);
     magnetState = false;
 
-    // Grip sensoru (mikroswitch GPIO 3 = UART RX). Boot ROM GPIO 3'u UART0
-    // RXD'ye baglayabilir; pinMode tek basina IO_MUX'u override etmeyebilir.
-    // gpio_reset_pin pini fabric'ten ayirir (kesinlikle GPIO), sonra
-    // INPUT_PULLUP olarak konfigure et.
+    // Grip mikroswitch GPIO 3 (UART RX); gpio_reset_pin UART peripheral
+    // baglantisini kopart — pinMode tek basina IO_MUX'u override etmiyordu.
     gpio_reset_pin((gpio_num_t)GRIP_SENSE_PIN);
     pinMode(GRIP_SENSE_PIN, INPUT_PULLUP);
 

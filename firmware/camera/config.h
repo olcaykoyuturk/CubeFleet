@@ -82,11 +82,9 @@
 #define SERVO_GRIPPER_PIN  12   // Gripper (MG90S) - GPIO 16 PSRAM CS oldugu icin 12'ye tasindi
 #define MAGNET_PIN          2   // MOSFET gate (10kΩ pull-down dısarıda)
 
-// Grip tutma sensoru — mikroswitch (KW10/KW12-3). NO terminal GPIO 3'e,
-// COM terminal GND'ye. Internal pull-up; switch acikken HIGH, basilinca LOW.
-// GPIO 3 normalde UART RX'tir; setup'ta Serial.begin cagrilmadigi icin UART
-// peripheral'i aktif edilmez ve pin INPUT_PULLUP olarak kullanilabilir.
-// (GPIO 0 XCLK kamera clock'u oldugu icin kullanilamaz.)
+// Grip mikroswitch (KW10/KW12-3): NO -> GPIO 3, COM -> GND.
+// GPIO 3 = UART0 RX; Serial.begin() cagirmiyoruz, bu yuzden bos.
+// FTDI takiliyken peripheral'i suruyor, normal kullanimda sokulu olmali.
 #define GRIP_SENSE_PIN          3
 #define GRIP_SENSE_ACTIVE_LOW   true
 

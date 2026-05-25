@@ -1,30 +1,7 @@
-"""
-dataset_capture.py — ESP32-CAM stream'inden YOLO dataset toplama UI.
-
-Standalone tool — agv_control.py'den bagimsiz. Sadece bir CAM URL gerek.
-
-Kullanim:
-    & "c:\\Projelerim\\AGV\\.venv\\Scripts\\python.exe" `
-        c:\\Projelerim\\AGV\\pc\\dataset_capture.py
-
-Akis:
-    1. Stream URL gir (default: http://192.168.4.50:81/stream)
-    2. Cikti klasoru sec (default: ./dataset)
-    3. "Yayin Ac" → frame'ler gelmeye baslar
-    4. "Kare Cek" → tek frame kaydet
-       VEYA "Auto" + interval saniye → otomatik periyodik kaydet
-    5. Sayac + son kaydedilen dosya adi UI'de gosterilir
-
-Dosya adi formati: cube_YYYYMMDD_HHMMSS_NNN.jpg
-    YYYYMMDD_HHMMSS: capture zamani
-    NNN: o klasordeki sira no (otomatik artar)
-
-Roboflow uplomak icin: cikti klasorunu zip'le, roboflow.com → upload.
-"""
+"""ESP32-CAM stream'inden YOLO dataset frame yakalama. Standalone."""
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 import datetime
@@ -35,7 +12,6 @@ import customtkinter as ctk
 import cv2
 from PIL import Image
 
-# Same-dir imports
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -43,7 +19,6 @@ if str(SCRIPT_DIR) not in sys.path:
 from stream_reader import StreamReader  # noqa: E402
 
 
-# --- Renkler / fontlar -------------------------------------------------------
 COL_BG_DEEP   = "#0F1419"
 COL_PANEL     = "#1A1F2E"
 COL_SUCCESS   = "#22C55E"
@@ -72,28 +47,24 @@ class DatasetCaptureApp(ctk.CTk):
         self.minsize(900, 560)
         self.configure(fg_color=COL_BG_DEEP)
 
-        # State
         self.reader: Optional[StreamReader] = None
-        self.last_frame = None              # son okunan numpy BGR frame
-        self.last_count = 0                 # son okunan frame index'i
-        self.saved_count = 0                # bu oturumda kaydedilen sayı
-        self.last_saved: str = "—"          # son dosya adi
-        self.session_seq = 1                # dosya numarasi
+        self.last_frame = None
+        self.last_count = 0
+        self.saved_count = 0
+        self.last_saved: str = "—"
+        self.session_seq = 1
         self.auto_active = False
         self.last_auto_save = 0.0
-        self._img_ref = None                # CTkImage GC korumasi
+        self._img_ref = None   # CTkImage GC korumasi
 
         self._build_ui()
         self._tick()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ------ UI ---------------------------------------------------------------
-
     def _build_ui(self):
         root = ctk.CTkFrame(self, fg_color="transparent")
         root.pack(fill="both", expand=True, padx=12, pady=12)
 
-        # Sol: preview
         left = ctk.CTkFrame(root, fg_color=COL_PANEL, corner_radius=8)
         left.pack(side="left", fill="both", expand=True, padx=(0, 8))
 
@@ -113,7 +84,6 @@ class DatasetCaptureApp(ctk.CTk):
                                      text_color=COL_MUTED, anchor="w")
         self.fps_lbl.pack(fill="x", padx=12, pady=(0, 12))
 
-        # Sag: kontroller
         right = ctk.CTkFrame(root, fg_color=COL_PANEL, corner_radius=8, width=340)
         right.pack(side="left", fill="y")
         right.pack_propagate(False)
@@ -122,7 +92,6 @@ class DatasetCaptureApp(ctk.CTk):
                      font=ctk.CTkFont(size=14, weight="bold")
                      ).pack(anchor="w", padx=12, pady=(10, 6))
 
-        # URL
         ctk.CTkLabel(right, text="Stream URL",
                      font=ctk.CTkFont(size=11), anchor="w"
                      ).pack(fill="x", padx=12)
@@ -131,7 +100,6 @@ class DatasetCaptureApp(ctk.CTk):
                      font=ctk.CTkFont(size=11)
                      ).pack(fill="x", padx=12, pady=(2, 8))
 
-        # Output dir
         ctk.CTkLabel(right, text="Cikti Klasoru",
                      font=ctk.CTkFont(size=11), anchor="w"
                      ).pack(fill="x", padx=12)
@@ -140,7 +108,6 @@ class DatasetCaptureApp(ctk.CTk):
                      font=ctk.CTkFont(size=11)
                      ).pack(fill="x", padx=12, pady=(2, 8))
 
-        # Connect/disconnect
         btn_row = ctk.CTkFrame(right, fg_color="transparent")
         btn_row.pack(fill="x", padx=12, pady=(4, 12))
         self.btn_connect = ctk.CTkButton(
@@ -154,7 +121,6 @@ class DatasetCaptureApp(ctk.CTk):
             command=self._on_disconnect)
         self.btn_disconnect.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
-        # Capture
         ctk.CTkLabel(right, text="YAKALAMA",
                      font=ctk.CTkFont(size=12, weight="bold")
                      ).pack(anchor="w", padx=12, pady=(8, 4))
@@ -165,10 +131,8 @@ class DatasetCaptureApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             command=self._capture_one, state="disabled")
         self.btn_capture.pack(fill="x", padx=12, pady=4)
-        # Space tusu binding
         self.bind("<space>", lambda e: self._capture_one())
 
-        # Auto-capture
         auto_row = ctk.CTkFrame(right, fg_color="transparent")
         auto_row.pack(fill="x", padx=12, pady=(8, 4))
         self.auto_var = ctk.BooleanVar(value=False)
@@ -206,13 +170,10 @@ class DatasetCaptureApp(ctk.CTk):
             text_color=COL_MUTED, anchor="w")
         self.last_lbl.pack(fill="x", padx=10, pady=(0, 8))
 
-        # Status bar (alt)
         self.status_lbl = ctk.CTkLabel(
             right, text="Hazir", font=ctk.CTkFont(size=10),
             text_color=COL_MUTED, anchor="w")
         self.status_lbl.pack(side="bottom", fill="x", padx=12, pady=8)
-
-    # ------ Bağlanma ---------------------------------------------------------
 
     def _on_connect(self):
         url = self.url_var.get().strip()
@@ -244,8 +205,6 @@ class DatasetCaptureApp(ctk.CTk):
         self._img_ref = None
         self._status("Kapatildi")
 
-    # ------ Yakalama ---------------------------------------------------------
-
     def _ensure_dir(self) -> Optional[Path]:
         d = self.dir_var.get().strip()
         if not d:
@@ -261,7 +220,6 @@ class DatasetCaptureApp(ctk.CTk):
 
     def _next_filename(self, out_dir: Path) -> Path:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Dosya numarasi: klasordeki mevcut cube_*.jpg sayisi + 1
         while True:
             fname = f"cube_{ts}_{self.session_seq:03d}.jpg"
             full = out_dir / fname
@@ -300,8 +258,6 @@ class DatasetCaptureApp(ctk.CTk):
         else:
             self._status("Auto kapatildi")
 
-    # ------ Tick -------------------------------------------------------------
-
     def _tick(self):
         try:
             if self.reader is not None:
@@ -310,7 +266,6 @@ class DatasetCaptureApp(ctk.CTk):
                     self.last_frame = frame
                     self.last_count = count
 
-                    # Preview goster
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     pil = Image.fromarray(rgb)
                     pil.thumbnail((self.PREVIEW_W, self.PREVIEW_H),
@@ -323,10 +278,9 @@ class DatasetCaptureApp(ctk.CTk):
                     self.fps_lbl.configure(
                         text=f"Frame: {count}   |   Boyut: {frame.shape[1]}x{frame.shape[0]}")
 
-                # Auto-capture
                 if self.auto_active:
                     try:
-                        interval = max(0.1, float(self.auto_interval.get()))
+                        interval = max(0.1, self.auto_interval.get())
                     except Exception:
                         interval = 2.0
                     if time.time() - self.last_auto_save >= interval:
@@ -334,9 +288,7 @@ class DatasetCaptureApp(ctk.CTk):
                         self.last_auto_save = time.time()
         except Exception as e:
             self._status(f"Tick hata: {e}", err=True)
-        self.after(33, self._tick)   # ~30 Hz UI
-
-    # ------ Util -------------------------------------------------------------
+        self.after(33, self._tick)
 
     def _status(self, msg: str, err: bool = False):
         self.status_lbl.configure(
