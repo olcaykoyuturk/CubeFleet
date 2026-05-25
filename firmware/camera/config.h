@@ -82,6 +82,14 @@
 #define SERVO_GRIPPER_PIN  12   // Gripper (MG90S) - GPIO 16 PSRAM CS oldugu icin 12'ye tasindi
 #define MAGNET_PIN          2   // MOSFET gate (10kΩ pull-down dısarıda)
 
+// Grip tutma sensoru — mikroswitch (KW10/KW12-3). NO terminal GPIO 3'e,
+// COM terminal GND'ye. Internal pull-up; switch acikken HIGH, basilinca LOW.
+// GPIO 3 normalde UART RX'tir; setup'ta Serial.begin cagrilmadigi icin UART
+// peripheral'i aktif edilmez ve pin INPUT_PULLUP olarak kullanilabilir.
+// (GPIO 0 XCLK kamera clock'u oldugu icin kullanilamaz.)
+#define GRIP_SENSE_PIN          3
+#define GRIP_SENSE_ACTIVE_LOW   true
+
 // Servo PWM hassasiyet aralıgı (genis aralik DS3218MG icin de tam isler)
 #define SERVO_MIN_US       500
 #define SERVO_MAX_US      2500

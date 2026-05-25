@@ -47,5 +47,11 @@ int  armGetTarget(int servoId);             // hedef aci
 void armMagnetOn();
 void armMagnetOff();
 bool armGetMagnetState();
+bool armGetGripSensor();                    // STABLE durum (debounce sonrasi)
+const char* armGripEventType();             // "held" | "lost" | "none"
+uint32_t    armGripEventSeq();              // monotonic; PC last_seq ile karsilastirir
+int  armGripRawGpio();                      // diagnostic: ham GPIO degeri (0/1)
+bool armGripPending();                      // diagnostic: debounce timer aktif mi
+void gripUpdate();                          // periyodik kontrol (loop'tan cagrilir)
 void armSetStepInterval(int ms);            // 5..500, kucuk = hizli
 int  armGetStepInterval();

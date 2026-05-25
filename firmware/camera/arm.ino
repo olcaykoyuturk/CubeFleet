@@ -18,6 +18,7 @@
 // =============================================================================
 
 #include "types.h"
+#include "driver/gpio.h"   // gpio_reset_pin — UART matrisinden GPIO 3'u ayir
 
 static int  curAngle[4]    = {90, 90, 90, 90};   // gercek (fiziksel) konum
 static int  targetAngle[4] = {90, 90, 90, 90};   // hedef konum (slider'dan gelir)
@@ -129,6 +130,13 @@ void armInit() {
     digitalWrite(MAGNET_PIN, LOW);
     magnetState = false;
 
+    // Grip sensoru (mikroswitch GPIO 3 = UART RX). Boot ROM GPIO 3'u UART0
+    // RXD'ye baglayabilir; pinMode tek basina IO_MUX'u override etmeyebilir.
+    // gpio_reset_pin pini fabric'ten ayirir (kesinlikle GPIO), sonra
+    // INPUT_PULLUP olarak konfigure et.
+    gpio_reset_pin((gpio_num_t)GRIP_SENSE_PIN);
+    pinMode(GRIP_SENSE_PIN, INPUT_PULLUP);
+
     camLog("Soft-start: sh=%d el=%d -> Sequential HOME baslatildi",
            curAngle[1], curAngle[2]);
 
@@ -219,6 +227,50 @@ int armGetTarget(int id) {
     return targetAngle[constrain(id, 0, 3)];
 }
 
+// ---- Grip sensoru state machine ----
+// Spam yerine kenarda log: kup yapisinca "TUTULDU", temas kaybinda "DUSTU".
+// Press/release ayni 50ms debounce — sadece mekanik bounce filtresi.
+
+static bool          gripStable        = false;
+static bool          gripPendingState  = false;
+static unsigned long gripPendingSince  = 0;
+static const unsigned long GRIP_DEBOUNCE_MS = 50;
+
+static volatile uint32_t gripEventSeq  = 0;
+static const char*       gripEventType = "none";
+
+bool armGetGripSensor()           { return gripStable; }
+const char* armGripEventType()    { return gripEventType; }
+uint32_t    armGripEventSeq()     { return gripEventSeq; }
+// Diagnostic — /grip-debug endpoint icin ham GPIO + pending state
+int  armGripRawGpio()             { return digitalRead(GRIP_SENSE_PIN); }
+bool armGripPending()             { return gripPendingSince > 0; }
+
+void gripUpdate() {
+    bool raw = (digitalRead(GRIP_SENSE_PIN) == LOW) == GRIP_SENSE_ACTIVE_LOW;
+    unsigned long now = millis();
+
+    if (raw == gripStable) {
+        gripPendingSince = 0;
+        return;
+    }
+    if (gripPendingSince == 0 || raw != gripPendingState) {
+        gripPendingState = raw;
+        gripPendingSince = now;
+        return;
+    }
+
+    if (now - gripPendingSince >= GRIP_DEBOUNCE_MS) {
+        gripStable = raw;
+        gripPendingSince = 0;
+        gripEventType = raw ? "held" : "lost";
+        gripEventSeq++;
+        if (raw) camLog("GRIP: kup TUTULDU (seq=%u)", (unsigned)gripEventSeq);
+        else     camLog("GRIP: kup DUSTU (seq=%u)", (unsigned)gripEventSeq);
+    }
+}
+
+// ---- Magnet kontrol ----
 void armMagnetOn() {
     if (!magnetState) camLog("Miknatis ACILDI");
     digitalWrite(MAGNET_PIN, HIGH);

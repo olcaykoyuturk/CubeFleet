@@ -28,6 +28,7 @@ from calibration_presets import PresetStore
 from agv_config          import AGVConfigStore
 from waypoint_canvas     import WaypointCanvas, FleetAGVDisplay
 from stream_reader       import StreamReader
+from detector            import get_detector
 from graph               import Graph
 from fleet_planner       import (
     FleetPlanner, HopAction, HopCommand,
@@ -198,6 +199,13 @@ class AGVControlApp(ctk.CTk):
         self.arm_led_vars:    Dict[str, ctk.IntVar]      = {}
         self.arm_led_lbls:    Dict[str, ctk.CTkLabel]    = {}
 
+        # YOLO tespit — per-AGV toggle (BooleanVar). Detector singleton (detector.py).
+        # AGV'lerin ayni CAM modeline baglanmasi gerekmez; her biri kendi frame'i
+        # uzerinde inference yapar, ortak model agirligini paylasir.
+        self.detect_vars:     Dict[str, ctk.BooleanVar]  = {}
+        self.detect_last_ms:  Dict[str, float]           = {}   # son inference suresi
+        self.detect_last_n:   Dict[str, int]             = {}   # son frame'de tespit sayisi
+
         # Görünüm modu: dual (varsayılan) = iki AGV yan yana, single = aktif olan büyük
         self.arm_view_mode:   str  = "dual"   # "dual" | "single"
         self.arm_single_agv:  Optional[str] = None   # single mode'da gösterilen AGV
@@ -218,12 +226,15 @@ class AGVControlApp(ctk.CTk):
         # JSON'dan yuklenecek kapma konfig
         self.pickup_cfg: Dict = self._pickup_load_config()
 
-        # ESP32-CAM log polling (kamera baglandiginda baslar)
+        # ESP32-CAM log polling — her AGV icin ayri thread, AGV connect olunca
+        # otomatik baslar. Stream sekmesinden bagimsiz: GRIP olaylari Arm
+        # sekmesi acik olmasa da Log paneline akar.
         import threading as _t
-        self._cam_log_stop_evt   = _t.Event()
-        self._cam_log_thread     = None     # type: Optional[_t.Thread]
-        self._cam_log_last_seq:   int = 0
-        # /poll ile gelen son arm state (drag etmeyen UI guncellenmeleri icin)
+        self._cam_log_stop_evt:   _t.Event                = _t.Event()
+        self._cam_log_threads:    Dict[str, _t.Thread]    = {}
+        self._cam_log_last_seq:   Dict[str, int]          = {}
+        self._cam_grip_last_seq:  Dict[str, int]          = {}
+        # /poll ile gelen son arm state — drag etmeyen UI guncellenmeleri icin
         self._cam_arm_state: Dict = {}
 
         # UI'da maksimum log satiri
@@ -666,6 +677,8 @@ class AGVControlApp(ctk.CTk):
             self.arm_speed_vars[agv_id] = ctk.IntVar(value=40)
         if agv_id not in self.arm_led_vars:
             self.arm_led_vars[agv_id] = ctk.IntVar(value=5)
+        if agv_id not in self.detect_vars:
+            self.detect_vars[agv_id] = ctk.BooleanVar(value=False)
 
     def _sync_stream_readers(self, visible: List[str]):
         """visible listesi dışındaki AGV'lerin stream reader'larını kapat."""
@@ -772,6 +785,21 @@ class AGVControlApp(ctk.CTk):
         ctk.CTkButton(btn_row, text="Durum Oku", width=110, height=28,
                       command=lambda: self._arm_fetch_state(agv_id),
                       font=self.font_small).pack(side="left", padx=2)
+
+        # YOLO tespit toggle — checkbox aktifken _process_camera inference yapar
+        # ve frame'e bbox + merkez overlay basar. Sag tarafta inference suresi (ms)
+        # + son frame'deki tespit sayisi gosterilir.
+        det_row = ctk.CTkFrame(card, fg_color="transparent")
+        det_row.pack(fill="x", padx=8, pady=(0, 8))
+        ctk.CTkCheckBox(det_row, text="🎯 Tespit (YOLO)",
+                        variable=self.detect_vars[agv_id],
+                        font=self.font_small).pack(side="left", padx=2)
+        det_info = ctk.CTkLabel(det_row, text="—", font=self.font_small,
+                                 anchor="w", text_color=COL_MUTED)
+        det_info.pack(side="left", padx=8)
+        if not hasattr(self, "detect_info_lbls"):
+            self.detect_info_lbls: Dict[str, ctk.CTkLabel] = {}
+        self.detect_info_lbls[agv_id] = det_info
 
     def _build_arm_controls_section(self, parent, agv_id: str):
         card = ctk.CTkFrame(parent)
@@ -936,8 +964,8 @@ class AGVControlApp(ctk.CTk):
         if agv_id not in self.arm_magnet_vars:
             return
         state = 1 if self.arm_magnet_vars[agv_id].get() else 0
-        self._arm_http_get(agv_id, f"/magnet?s={state}")
         self._set_status(f"{agv_id} mıknatıs: {'AÇIK' if state else 'KAPALI'}")
+        self._arm_http_get(agv_id, f"/magnet?s={state}")
 
     def _arm_speed_label_update(self, agv_id: str, ms: int):
         dps = (1000 // ms) if ms > 0 else 0
@@ -2065,9 +2093,8 @@ class AGVControlApp(ctk.CTk):
         self.cam_last_count[agv_id] = 0
         self.cam_last_time[agv_id]  = time.time()
         self.cam_fps[agv_id]        = 0.0
-        # ESP32-CAM log polling sadece ilk açılan kamera için (basit tek-AGV impl.)
-        if len(self.stream_readers) == 1:
-            self._cam_log_start(url)
+        # ESP32-CAM log polling AGV connect olunca otomatik baslar
+        # (agv_update connect transition handler'da), burada gerek yok.
 
     def _cam_disconnect(self, agv_id: str):
         """Belirtilen AGV'nin stream'ini kapat, görsel referansları temizle."""
@@ -2088,66 +2115,98 @@ class AGVControlApp(ctk.CTk):
         if not self.stream_readers:
             self._cam_log_stop()
 
-    # ----- ESP32-CAM log polling -----
-    def _cam_log_start(self, stream_url: str):
+    # ----- ESP32-CAM log polling (per-AGV) -----
+    def _cam_log_start_for_agv(self, agv_id: str):
+        """AGV connect olunca cagrilir — agv_config'deki cam URL'sini al ve
+        polling thread baslat. Mevcut thread varsa atla."""
         import threading
         from urllib.parse import urlparse
-        if self._cam_log_thread is not None and self._cam_log_thread.is_alive():
+        if not agv_id:
             return
-        host = urlparse(stream_url).hostname
+        existing = self._cam_log_threads.get(agv_id)
+        if existing is not None and existing.is_alive():
+            return
+        cfg = self.agv_config_store.get(agv_id)
+        host = urlparse(cfg.cam_stream_url).hostname if cfg.cam_stream_url else None
         if not host:
             return
-        self._cam_log_stop_evt.clear()
-        self._cam_log_last_seq = 0
-        self._cam_log_thread = threading.Thread(
-            target=self._cam_log_loop, args=(host,), daemon=True
+        self._cam_log_last_seq[agv_id]  = 0
+        self._cam_log_threads[agv_id]   = threading.Thread(
+            target=self._cam_log_loop, args=(agv_id, host), daemon=True,
         )
-        self._cam_log_thread.start()
+        self._cam_log_threads[agv_id].start()
+
+    def _cam_log_stop_for_agv(self, agv_id: str):
+        """AGV disconnect olunca cagrilir. Thread bir sonraki iterasyonda cikar
+        (stop_evt set + dict'ten kaldirildi → kontrol gor)."""
+        self._cam_log_threads.pop(agv_id, None)
+        self._cam_log_last_seq.pop(agv_id, None)
+        self._cam_grip_last_seq.pop(agv_id, None)
 
     def _cam_log_stop(self):
+        """Tum cam polling thread'lerini durdur."""
         self._cam_log_stop_evt.set()
+        self._cam_log_threads.clear()
 
-    def _cam_log_loop(self, host: str):
-        # /poll?logSince=N - arm state + log birlikte gelir (tek istek = 2 islem)
+    def _cam_log_loop(self, agv_id: str, host: str):
+        """Per-AGV poll. AGV thread dict'ten cikarilmissa kendi kendine sonlanir."""
         import urllib.request, json
         while not self._cam_log_stop_evt.is_set():
+            # AGV disconnect oldu → thread cikar
+            if agv_id not in self._cam_log_threads:
+                return
             try:
-                url = f"http://{host}/poll?logSince={self._cam_log_last_seq}"
+                last_seq = self._cam_log_last_seq.get(agv_id, 0)
+                url = f"http://{host}/poll?logSince={last_seq}"
                 with urllib.request.urlopen(url, timeout=3.0) as r:
                     data = json.loads(r.read().decode("utf-8", errors="replace"))
 
                 cam_id = str(data.get("id", "CAM?"))
+                arm    = data.get("arm", {}) or {}
 
-                # --- Arm state cache (drag etmeyen slider'lar UI'de guncellenir) ---
-                arm = data.get("arm", {}) or {}
-                self._cam_arm_state = {
-                    "camId":   cam_id,
-                    "servos":  list(arm.get("servos", [])),
-                    "targets": list(arm.get("targets", [])),
-                    "magnet":  bool(arm.get("magnet", 0)),
-                    "speedMs": int(arm.get("speedMs", 40)),
-                    "led":     int(arm.get("led", 0)),
-                }
+                # Arm state cache (aktif AGV ise UI guncellenir)
+                if agv_id == self.active_agv:
+                    self._cam_arm_state = {
+                        "camId":   cam_id,
+                        "servos":  list(arm.get("servos", [])),
+                        "targets": list(arm.get("targets", [])),
+                        "magnet":  bool(arm.get("magnet", 0)),
+                        "speedMs": int(arm.get("speedMs", 40)),
+                        "led":     int(arm.get("led", 0)),
+                    }
 
-                # --- Log entry'leri ---
+                # Grip event — seq degisirse vurgulu log (basit text "GRIP: kup
+                # TUTULDU" zaten log entry olarak gelecek; bu ekstra prefix ile
+                # akiska aciklik ekler ve PC tarafinda state machine'e baglanir).
+                grip_seq  = int(arm.get("gripEventSeq", 0))
+                grip_type = str(arm.get("gripEvent", "none"))
+                last_grip = self._cam_grip_last_seq.get(agv_id, 0)
+                if grip_seq > last_grip and grip_type in ("held", "lost"):
+                    self._cam_grip_last_seq[agv_id] = grip_seq
+                    icon = "🎯" if grip_type == "held" else "❗"
+                    label = "KUP TUTULDU" if grip_type == "held" else "KUP DUSTU"
+                    self.after(0, lambda a=agv_id, ic=icon, lb=label, s=grip_seq:
+                        self._add_log(LogEvent(
+                            agvId=a, message=f"{ic} {lb} (seq={s})",
+                            time_ms=0, wall_time=time.time(),
+                        )))
+
+                # Log entry'leri
                 log_blk = data.get("log", {}) or {}
                 cur_seq = int(log_blk.get("seq", 0))
                 entries = log_blk.get("entries", []) or []
                 entries.sort(key=lambda e: int(e.get("seq", 0)))
                 for e in entries:
                     seq_i = int(e.get("seq", 0))
-                    if seq_i <= self._cam_log_last_seq:
+                    if seq_i <= self._cam_log_last_seq.get(agv_id, 0):
                         continue
-                    self._cam_log_last_seq = seq_i
+                    self._cam_log_last_seq[agv_id] = seq_i
                     msg  = str(e.get("msg", ""))
                     ms_i = int(e.get("ms", 0))
-                    self.after(
-                        0,
-                        lambda c=cam_id, m=msg, t=ms_i:
-                            self._add_log(LogEvent(agvId=c, message=m, time_ms=t))
-                    )
-                if cur_seq > self._cam_log_last_seq:
-                    self._cam_log_last_seq = cur_seq
+                    self.after(0, lambda c=cam_id, m=msg, t=ms_i:
+                        self._add_log(LogEvent(agvId=c, message=m, time_ms=t)))
+                if cur_seq > self._cam_log_last_seq.get(agv_id, 0):
+                    self._cam_log_last_seq[agv_id] = cur_seq
             except Exception:
                 pass
             # 1.5 sn aralikla yokla, stop sinyalinde hemen cik
@@ -2396,6 +2455,18 @@ class AGVControlApp(ctk.CTk):
                 self.cam_last_count[agv_id] = count
                 self.cam_last_time[agv_id]  = now
 
+            # YOLO tespit (checkbox aktifse) — frame'i in-place modify et
+            if self.detect_vars.get(agv_id) and self.detect_vars[agv_id].get():
+                det = get_detector()
+                dets = det.detect(frame)
+                det.draw(frame, dets)
+                self.detect_last_ms[agv_id] = det.last_infer_ms
+                self.detect_last_n[agv_id] = len(dets)
+                info = self.detect_info_lbls.get(agv_id) if hasattr(self, "detect_info_lbls") else None
+                if info is not None:
+                    info.configure(
+                        text=f"{len(dets)} tespit  |  {det.last_infer_ms:.0f} ms")
+
             # Video label varsa frame'i göster (dual'da küçük, single'da büyük)
             vlbl = self.cam_video_lbls.get(agv_id)
             if vlbl is None:
@@ -2568,6 +2639,9 @@ class AGVControlApp(ctk.CTk):
                     # Auto-apply: her AGV icin disconnect→connect gecisini kontrol et
                     for s_ in self.agvs.values():
                         self._check_auto_apply(s_)
+                        # Cam log polling her bagli AGV icin (ilk list'te de baslat)
+                        if s_.connected:
+                            self._cam_log_start_for_agv(s_.id)
                     need_list_refresh   = True
                     need_active_refresh = True
                     need_health_refresh = True
@@ -2610,10 +2684,13 @@ class AGVControlApp(ctk.CTk):
                                         f" (pos={s.currentWaypoint or '-'})",
                                 time_ms=0, wall_time=time.time(),
                             ))
-                            # Reconnect ise: bir sonraki tick'te dispatch
-                            # tekrar baslar, mission devam eder.
                             if s.connected:
+                                # Cam log polling baslat (Arm sekmesi gerek yok —
+                                # GRIP olaylari her zaman Log paneline gelir)
+                                self._cam_log_start_for_agv(s.id)
                                 self._planner_tick_and_dispatch()
+                            else:
+                                self._cam_log_stop_for_agv(s.id)
                         # Planner drift correction: AGV gercek pozisyonu planner'in
                         # bildiginden farkliysa senkronla. (Connected AGV'ler icin.)
                         if s.connected and s.currentWaypoint:

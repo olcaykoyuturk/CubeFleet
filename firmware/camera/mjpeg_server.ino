@@ -136,6 +136,12 @@ static void handlePoll() {
     }
     out += "],\"magnet\":";
     out += (armGetMagnetState() ? 1 : 0);
+    out += ",\"grip\":";
+    out += (armGetGripSensor() ? 1 : 0);
+    out += ",\"gripEvent\":\"";
+    out += armGripEventType();
+    out += "\",\"gripEventSeq\":";
+    out += (unsigned)armGripEventSeq();
     out += ",\"speedMs\":";
     out += armGetStepInterval();
     out += ",\"led\":";
@@ -201,14 +207,18 @@ static void handleMagnet() {
 
 // GET /arm/state
 static void handleArmState() {
-    char buf[256];
+    char buf[336];
     snprintf(buf, sizeof(buf),
              "{\"id\":\"%s\",\"servos\":[%d,%d,%d,%d],\"targets\":[%d,%d,%d,%d],"
-             "\"magnet\":%d,\"speedMs\":%d,\"led\":%u}",
+             "\"magnet\":%d,\"grip\":%d,"
+             "\"gripEvent\":\"%s\",\"gripEventSeq\":%u,"
+             "\"speedMs\":%d,\"led\":%u}",
              CAM_ID,
              armGetAngle(0), armGetAngle(1), armGetAngle(2), armGetAngle(3),
              armGetTarget(0), armGetTarget(1), armGetTarget(2), armGetTarget(3),
              armGetMagnetState() ? 1 : 0,
+             armGetGripSensor() ? 1 : 0,
+             armGripEventType(), (unsigned)armGripEventSeq(),
              armGetStepInterval(),
              (unsigned)getFlashLedBrightness());
     httpServer.send(200, "application/json", buf);
@@ -239,6 +249,36 @@ static void handleLed() {
     setFlashLedBrightness((uint8_t)b);
     char buf[32];
     snprintf(buf, sizeof(buf), "{\"led\":%d}", b);
+    httpServer.send(200, "application/json", buf);
+}
+
+// GET /reboot - remote restart (dev/teshis icin)
+static void handleReboot() {
+    httpServer.send(200, "application/json", "{\"reboot\":1}");
+    delay(100);
+    ESP.restart();
+}
+
+// GET /grip-debug - grip sensor diagnostic. Switch ile sorun yasaniyorsa bu
+// endpoint ile ham GPIO durumu, debounce state, son event sira no okunur.
+//   raw_gpio:    digitalRead(GRIP_SENSE_PIN) ham deger (0=LOW, 1=HIGH)
+//   pressed:     active_low yorumu sonrasi "basili mi" (0/1)
+//   stable:      debounce sonrasi stable state (0/1)
+//   pending:     suan bir debounce timer'i calisiyor mu (0/1)
+//   event:       "held" | "lost" | "none"
+//   seq:         son event sira numarasi
+static void handleGripDebug() {
+    int  raw     = armGripRawGpio();
+    bool pressed = (raw == LOW);   // active_low varsayim — config.h ile uyumlu
+    char buf[224];
+    snprintf(buf, sizeof(buf),
+        "{\"raw_gpio\":%d,\"pressed\":%d,\"stable\":%d,\"pending\":%d,"
+        "\"event\":\"%s\",\"seq\":%u,\"magnet\":%d}",
+        raw, pressed ? 1 : 0,
+        armGetGripSensor() ? 1 : 0,
+        armGripPending() ? 1 : 0,
+        armGripEventType(), (unsigned)armGripEventSeq(),
+        armGetMagnetState() ? 1 : 0);
     httpServer.send(200, "application/json", buf);
 }
 
@@ -360,6 +400,8 @@ void mjpegServerStart() {
     httpServer.on("/arm/home",   HTTP_GET, handleArmHome);     // sequential home
     httpServer.on("/servo/speed", HTTP_GET, handleServoSpeed); // ramping ms ayari
     httpServer.on("/led",         HTTP_GET, handleLed);        // flash LED parlaklik
+    httpServer.on("/reboot",      HTTP_GET, handleReboot);     // remote restart
+    httpServer.on("/grip-debug",  HTTP_GET, handleGripDebug);  // diagnostic
     httpServer.onNotFound([]() { httpServer.send(404, "text/plain", "Not Found"); });
     httpServer.begin();
 

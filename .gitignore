@@ -1,0 +1,50 @@
+# =============================================================================
+# CubeFleet — .gitignore
+# =============================================================================
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Claude Code (local-only settings/agent state)
+.claude/
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Arduino build artefaktları
+build/
+*.bin
+*.elf
+*.map
+*.hex
+arduino_cache_*/
+arduino_build_*/
+
+# Kullanıcı-spesifik kalibrasyon/config (çalıştırınca üretilir)
+pc/pickup_config.json
+pc/calibration_presets.json
+pc/agv_config.json
+
+# YOLO dataset (capture script üretir; eğitim verisi repo dışı)
+dataset/
+
+# Ultralytics base model cache (auto-download)
+/yolo*.pt
+
+# Test sketch'leri (depo dışı tutuluyor)
+tests/
+
+# Dokümantasyon / markdown dosyaları (depo dışı tutuluyor)
+*.md
+docs/

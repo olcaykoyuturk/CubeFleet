@@ -59,7 +59,7 @@ bool cameraInit() {
         config.fb_location = CAMERA_FB_IN_DRAM;
         config.fb_count    = 1;                    // DRAM kucuk, tek fb
         config.grab_mode   = CAMERA_GRAB_WHEN_EMPTY;
-        Serial.println("[cam] UYARI: PSRAM yok, DRAM 1 fb modu");
+        camLog("UYARI: PSRAM yok, DRAM 1 fb modu");
     }
 
     esp_err_t err = esp_camera_init(&config);
@@ -111,7 +111,10 @@ uint8_t getFlashLedBrightness() {
 }
 
 void setup() {
-    Serial.begin(115200);
+    // NOT: Serial.begin cagrilmiyor — UART0 peripheral'i init edilmez, GPIO 3
+    // (UART RX) serbest kalir ve grip sensoru (mikroswitch) icin
+    // INPUT_PULLUP olarak kullanilabilir. Tum runtime log akisi camLog
+    // ring buffer + /poll endpoint uzerinden PC log paneline gider.
     delay(500);
 
     pinMode(BOARD_LED_PIN, OUTPUT);
@@ -142,7 +145,7 @@ void setup() {
     }
     wifiPrintInfo();
 
-    // 4. Robot kol (servo timer 2-3 + miknatis GPIO)
+    // 4. Robot kol (servo timer 2-3 + miknatis GPIO + grip sensoru GPIO 3)
     armInit();
 
     // 5. HTTP / MJPEG + Kol endpoint'leri
@@ -155,16 +158,13 @@ void setup() {
 void loop() {
     mjpegServerLoop();
     armUpdate();           // servo ramping adimi (her ~20 ms'de 2°)
+    gripUpdate();          // grip sensoru debounce + edge logu
 
-    // FPS sadece Serial'de (UI log'una dusurmuyoruz - gurultu olmasin)
+    // FPS metrik takip — Serial yok, sadece sayac guncelle
+    // (degerler /status endpoint'inden okunabilir).
     unsigned long now = millis();
     if (now - lastDebug >= DEBUG_INTERVAL) {
-        unsigned long total = mjpegFrameCount();
-        unsigned long delta = total - framesAtLog;
-        float fps = (delta * 1000.0f) / (now - lastDebug);
-        Serial.printf("[%s] FPS:%.1f istemci:%d heap:%u\n",
-                      CAM_ID, fps, mjpegClientCount(), ESP.getFreeHeap());
-        framesAtLog = total;
+        framesAtLog = mjpegFrameCount();
         lastDebug   = now;
     }
 

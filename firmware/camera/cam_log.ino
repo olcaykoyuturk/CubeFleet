@@ -43,10 +43,8 @@ void camLog(const char* fmt, ...) {
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
 
-    // Serial debug
-    Serial.printf("[%s t=%lu] %s\n", CAM_ID, (unsigned long)millis(), msg);
-
-    // Ring buffer (thread-safe)
+    // Ring buffer (thread-safe). Serial init edilmiyor — PC /poll endpoint
+    // ile log entry'leri ceker, ekran disi kalan mesaj olmaz.
     if (logMutex) xSemaphoreTake(logMutex, portMAX_DELAY);
     uint32_t seq = ++logSeqCounter;
     logRing[logHead].seq = seq;
