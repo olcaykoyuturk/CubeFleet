@@ -81,6 +81,11 @@
 #define SERVO_ELBOW_PIN    15   // Elbow (MG996R) - dirsek
 #define SERVO_GRIPPER_PIN  12   // Gripper (MG90S) - GPIO 16 PSRAM CS oldugu icin 12'ye tasindi
 #define MAGNET_PIN          2   // MOSFET gate (10kΩ pull-down dısarıda)
+// Miknatis termal koruma: kup TUTULMADAN bu kadar ms acik kalirsa otomatik
+// kapatilir (surekli DC ~2.5W → 5-10dk'da 80°C+). Kup tutuldugunda (grip 'held')
+// sayac resetlenir, tasima boyunca acik kalir. LEDC timer GEREKMEZ (digitalWrite
+// + millis). PC ACIL DUR ayrica /magnet?s=0 yollar; bu firmware son savunma.
+#define MAGNET_MAX_ON_MS    30000UL   // 30 sn (kupsuz)
 
 // Grip mikroswitch (KW10/KW12-3): NO -> GPIO 3, COM -> GND.
 // GPIO 3 = UART0 RX; Serial.begin() cagirmiyoruz, bu yuzden bos.
@@ -103,16 +108,29 @@
 // Bunun icin /arm/home endpoint'i kullanilir (armGoHome fonksiyonu).
 #define SERVO_BASE_MIN       0
 #define SERVO_BASE_MAX     180
-#define SERVO_BASE_HOME     93
+#define SERVO_BASE_HOME    100
 
 #define SERVO_SHOULDER_MIN   0
-#define SERVO_SHOULDER_MAX 120
-#define SERVO_SHOULDER_HOME 120    // park konumu - HOME sirasinda ILK ayarlanir
+#define SERVO_SHOULDER_MAX 180     // 120 -> 180 genisletildi (carpisma korumasi kinematik modelden)
+#define SERVO_SHOULDER_HOME 170    // park konumu - HOME sirasinda ILK ayarlanir
 
-#define SERVO_ELBOW_MIN      4
-#define SERVO_ELBOW_MAX    153
-#define SERVO_ELBOW_HOME    15     // shoulder hazir olunca
+#define SERVO_ELBOW_MIN      0     // TEST: limit kaldirildi (4->0)
+#define SERVO_ELBOW_MAX    180     // TEST: limit kaldirildi (153->180)
+#define SERVO_ELBOW_HOME    40     // shoulder hazir olunca
 
 #define SERVO_GRIPPER_MIN    0
-#define SERVO_GRIPPER_MAX  160
-#define SERVO_GRIPPER_HOME 110
+#define SERVO_GRIPPER_MAX  180     // TEST: limit kaldirildi (160->180)
+#define SERVO_GRIPPER_HOME  80
+
+// -----------------------------------------------------------------------------
+// BOOT (soft-start) pozisyonu — kol GUC KESIKKEN yer cekimiyle nerede DURUYORSA
+// o degerleri yaz. Boot'ta ilk PWM darbesi servoyu bu poza "fislatir" (servo
+// fizigi: ilk komut anlik snap, yavaslatilamaz). curAngle = BOOT bu snap'i
+// MINIMUM yapar (servo zaten orada), ardindan HOME'a ayarlanan hizda (25°/sn)
+// YAVASCA rampalanir. Eskiden base/elbow/gripper dogrudan HOME'a yaziliyordu
+// (anlik firlatma); artik hepsi BOOT'tan HOME'a yumusak rampalar.
+// DOGRU AYAR: gucu kes, kol nerede duruyorsa o servo degerlerini buraya yaz.
+#define SERVO_BASE_BOOT     100
+#define SERVO_SHOULDER_BOOT  70     // kol asagi dusmus (rest); HOME(170)'a yukselir
+#define SERVO_ELBOW_BOOT     90
+#define SERVO_GRIPPER_BOOT   80

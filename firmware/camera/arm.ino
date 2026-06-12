@@ -26,6 +26,7 @@ static bool servoReached[4] = {true, true, true, true};  // hedefe ulasti mi (te
 static unsigned long lastServoStep = 0;
 static int  servoStepIntervalMs = SERVO_STEP_INTERVAL_MS;   // runtime'da degistirilebilir
 static bool magnetState = false;
+static unsigned long magnetOnSince = 0;   // millis() — termal timeout sayaci
 static const char* SERVO_NAME[4] = {"Base", "Shoulder", "Elbow", "Gripper"};
 
 static const int SERVO_PINS[4] = {
@@ -103,20 +104,16 @@ void armInit() {
         }
     }
 
-    // Boot soft-start: ilk PWM curAngle'a fırlar (kacinilmaz). Bu yüzden
-    // baslangıç açılarını HOME'a YAKIN ama biraz farkli verip, ardindan
-    // armGoHome ile sequential ramping (1°/40ms = 25°/sn) ile gerçek HOME'a
-    // yavaşça çekiyoruz. Kullanici "fıs" şeklinde HOME'a fırlamasi yerine
-    // yumuşak bir yukseliş görüyor.
-    //
-    // Soft-start offsetleri — shoulder en cok yuk taşır, en görünür hareket
-    // burada olsun. Diğerleri HOME'a yakın başlar (kucuk düzelme).
-    curAngle[0] = SERVO_BASE_HOME;                                   // base merkez
-    curAngle[1] = constrain(SERVO_SHOULDER_HOME - 40,                // shoulder 40° aşağıda
-                            SERVO_SHOULDER_MIN, SERVO_SHOULDER_MAX);
-    curAngle[2] = constrain(SERVO_ELBOW_HOME + 25,                   // elbow biraz açık
-                            SERVO_ELBOW_MIN, SERVO_ELBOW_MAX);
-    curAngle[3] = SERVO_GRIPPER_HOME;                                // gripper home
+    // Boot soft-start: ilk PWM curAngle'a fırlar (servo fizigi, kacinilmaz).
+    // Bu yüzden curAngle = BOOT pozu (kolun güç kesikken durdugu yer) -> ilk
+    // snap MINIMUM olur, ardindan TÜM servolar HOME'a ayarlanan hizda (25°/sn)
+    // YAVASCA rampalanir. Eskiden base/elbow/gripper dogrudan HOME'a yaziliyordu
+    // (anlik firlatma); artik hepsi BOOT'tan yumusak rampalar.
+    // BOOT degerlerini config.h'da kolun gerçek dinlenme pozuna ayarla.
+    curAngle[0] = constrain(SERVO_BASE_BOOT, SERVO_BASE_MIN, SERVO_BASE_MAX);
+    curAngle[1] = constrain(SERVO_SHOULDER_BOOT, SERVO_SHOULDER_MIN, SERVO_SHOULDER_MAX);
+    curAngle[2] = constrain(SERVO_ELBOW_BOOT, SERVO_ELBOW_MIN, SERVO_ELBOW_MAX);
+    curAngle[3] = constrain(SERVO_GRIPPER_BOOT, SERVO_GRIPPER_MIN, SERVO_GRIPPER_MAX);
 
     for (int i = 0; i < 4; i++) {
         targetAngle[i]  = curAngle[i];
@@ -272,7 +269,8 @@ void gripUpdate() {
 void armMagnetOn() {
     if (!magnetState) camLog("Miknatis ACILDI");
     digitalWrite(MAGNET_PIN, HIGH);
-    magnetState = true;
+    magnetState   = true;
+    magnetOnSince = millis();   // termal timeout sayacini baslat
 }
 
 void armMagnetOff() {
@@ -283,6 +281,22 @@ void armMagnetOff() {
 
 bool armGetMagnetState() {
     return magnetState;
+}
+
+// Termal koruma: miknatis kup TUTMADAN MAGNET_MAX_ON_MS gecerse otomatik kapat.
+// Kup tutuldugunda (grip 'held') sayac resetlenir → tasima boyunca acik kalir.
+// loop()'tan her cagrilir; sadece millis karsilastirir, PWM/timer kullanmaz.
+void armMagnetUpdate() {
+    if (!magnetState) return;
+    if (armGetGripSensor()) {        // kup tutuldu → sayaci ertele, acik kal
+        magnetOnSince = millis();
+        return;
+    }
+    if (millis() - magnetOnSince >= MAGNET_MAX_ON_MS) {
+        camLog("Miknatis TIMEOUT (%lu ms, kup yok) — termal koruma kapatti",
+               (unsigned long)MAGNET_MAX_ON_MS);
+        armMagnetOff();
+    }
 }
 
 // ---- Servo hizi (ramping interval) ----
