@@ -118,9 +118,13 @@ class PickupTest(ctk.CTk):
             return {}
 
     def _save_cfg(self):
+        # ATOMIK yazim (tmp + os.replace): agv_control da ayni dosyaya yazar;
+        # yarida kesilen json.dump dosyayi bozuyordu.
         try:
-            with open(PICKUP_CFG, "w", encoding="utf-8") as f:
-                json.dump(self.pickup_cfg, f, indent=2)
+            tmp = PICKUP_CFG + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.pickup_cfg, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, PICKUP_CFG)
             self.log(f"💾 config kaydedildi → {PICKUP_CFG}")
         except Exception as e:
             self.log(f"❌ config kaydedilemedi: {e}")

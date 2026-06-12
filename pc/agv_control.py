@@ -1553,6 +1553,15 @@ class AGVControlApp(ctk.CTk):
             self._update_active_agv_indicator()
 
     def _select_agv(self, agv_id: str):
+        # Aktif AGV degisiyor: ESKI AGV'nin kapma kontroloru calisiyorsa durdur
+        # — stream sadece aktif AGV icin acik kalir, eski kontrolor tespitsiz
+        # kor calisip lost-abort'a duserdi; temiz durdurmak daha guvenli.
+        if self.active_agv and self.active_agv != agv_id:
+            old = self.auto_pickup.get(self.active_agv)
+            if old is not None and getattr(old, "active", False):
+                old.stop()
+                self._pickup_log(self.active_agv,
+                                 "aktif AGV değişti — kapma durduruldu")
         self.active_agv = agv_id
         self._refresh_agv_list()
         self._update_active_view()
@@ -2235,10 +2244,14 @@ class AGVControlApp(ctk.CTk):
             return {}
 
     def _pickup_save_config(self):
+        """ATOMIK yazim (tmp + os.replace): pickup_test.py de ayni dosyaya
+        yazabilir; yarida kesilen json.dump dosyayi bozuyordu."""
         import json
         try:
-            with open(PICKUP_CFG_PATH, "w", encoding="utf-8") as f:
+            tmp = PICKUP_CFG_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.pickup_cfg, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, PICKUP_CFG_PATH)
         except Exception as e:
             self._set_status(f"pickup_config kaydedilemedi: {e}", err=True)
 
