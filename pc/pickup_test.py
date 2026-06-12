@@ -1113,8 +1113,14 @@ class CalibWizard(ctk.CTkToplevel):
         self._cap_btn(row, "➕ örnek ekle", lambda: self._do(self._add_cam_sample))
         samples = getattr(self, "cam_samples", [])
         for i, s in enumerate(samples):
-            self._para(f"  #{i+1}: ölçülen ({s[3]:g}, {s[4]:g}) cm  "
-                       f"piksel ({s[1]:.0f}, {s[2]:.0f})", "#9c9", 11)
+            srow = ctk.CTkFrame(self.body, fg_color="transparent")
+            srow.pack(fill="x", pady=1)
+            ctk.CTkLabel(srow, text=f"#{i+1}: ölçülen ({s[3]:g}, {s[4]:g}) cm  "
+                         f"piksel ({s[1]:.0f}, {s[2]:.0f})", anchor="w",
+                         font=("", 11), text_color="#9c9").pack(side="left")
+            ctk.CTkButton(srow, text="🗑", width=30, height=22, fg_color="#a33",
+                          command=lambda k=i: self._do(lambda: self._del_cam(k))
+                          ).pack(side="right")
         if samples:
             r2 = ctk.CTkFrame(self.body, fg_color="transparent")
             r2.pack(fill="x", pady=2)
@@ -1155,11 +1161,18 @@ class CalibWizard(ctk.CTkToplevel):
         """Ornekleri config'e yaz (kalici) — sihirbaz kapanip acilinca durur."""
         self._kin()["cam_samples"] = [list(s) for s in self.cam_samples]
 
+    def _del_cam(self, idx: int):
+        if 0 <= idx < len(self.cam_samples):
+            s = self.cam_samples.pop(idx)
+            self._save_cam_samples()
+            return True, f"örnek #{idx+1} ({s[3]:g}, {s[4]:g}) silindi"
+        return False, "örnek yok"
+
     def _clr_cam(self):
         self.cam_samples = []
         self.cam_rms = None
         self._save_cam_samples()
-        return True, "kamera örnekleri silindi"
+        return True, "tüm kamera örnekleri silindi"
 
     def _solve_cam(self):
         samples = getattr(self, "cam_samples", [])
