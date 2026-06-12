@@ -800,12 +800,15 @@ class CalibWizard(ctk.CTkToplevel):
 
         nav = ctk.CTkFrame(self, fg_color="transparent")
         nav.pack(fill="x", padx=12, pady=(0, 10))
-        self.back_btn = ctk.CTkButton(nav, text="← Geri", width=90,
+        self.back_btn = ctk.CTkButton(nav, text="← Geri", width=80,
                                       fg_color="#555", command=self._back)
         self.back_btn.pack(side="left")
-        self.status = ctk.CTkLabel(nav, text="", font=("", 11), wraplength=300)
-        self.status.pack(side="left", padx=10)
-        self.next_btn = ctk.CTkButton(nav, text="İleri →", width=110,
+        # her an diske kaydet (sihirbazi bitirmeden de) — uygulama kapaninca ucmaz
+        ctk.CTkButton(nav, text="💾 Kaydet", width=84, fg_color="#46a",
+                      command=self._save_now).pack(side="left", padx=4)
+        self.status = ctk.CTkLabel(nav, text="", font=("", 11), wraplength=260)
+        self.status.pack(side="left", padx=8)
+        self.next_btn = ctk.CTkButton(nav, text="İleri →", width=100,
                                       fg_color="#3fbf66", command=self._next)
         self.next_btn.pack(side="right")
 
@@ -836,6 +839,12 @@ class CalibWizard(ctk.CTkToplevel):
         except Exception:
             pass
         self._after = self.after(200, self._tick)
+
+    def _save_now(self):
+        """Sihirbazi bitirmeden DİSKE kaydet — her an basilabilir."""
+        self.app._save_cfg()
+        self.app._refresh_kin_status()
+        self.status.configure(text="💾 diske kaydedildi", text_color="#7c7")
 
     def _clear_body(self):
         for w in self.body.winfo_children():
