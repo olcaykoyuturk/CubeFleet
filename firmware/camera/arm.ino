@@ -160,13 +160,16 @@ void armFreeze() {
            curAngle[0], curAngle[1], curAngle[2], curAngle[3]);
 }
 
-// Sequential HOME: once shoulder home'a gider (carpisma onleme),
-// shoulder hedefte iken digerleri (base/elbow/gripper) baslar.
+// Sequential HOME — 3 asama (carpisma onleme; kol AGV USTUNDE):
+//   0) once ELBOW yukari (clearance) — alcaktayken shoulder donerse araca
+//      sikisir, once forearm'i kaldir
+//   1) sonra SHOULDER home'a otursun
+//   2) sonra ELBOW asagi (final) + base/gripper
 void armGoHome() {
     homeStage = 0;
-    targetAngle[1]  = SERVO_SHOULDER_HOME;
-    servoReached[1] = (curAngle[1] == targetAngle[1]);
-    camLog("HOME baslatildi: once shoulder -> %d°", SERVO_SHOULDER_HOME);
+    targetAngle[2]  = SERVO_ELBOW_CLEAR;
+    servoReached[2] = (curAngle[2] == targetAngle[2]);
+    camLog("HOME baslatildi: once elbow -> %d° (clearance)", SERVO_ELBOW_CLEAR);
 }
 
 // Her loop'ta cagrilir; SERVO_STEP_INTERVAL_MS gecmisse hedefe yaklas.
@@ -195,17 +198,24 @@ void armUpdate() {
         ledcWrite(SERVO_PINS[i], angleToDuty(i, curAngle[i]));
     }
 
-    // ---- HOME sequence ilerletme ----
-    if (homeStage == 0 && curAngle[1] == SERVO_SHOULDER_HOME) {
+    // ---- HOME sequence ilerletme (3 asama) ----
+    if (homeStage == 0 && curAngle[2] == SERVO_ELBOW_CLEAR) {
+        // elbow clearance'a ulasti -> shoulder home'a
         homeStage = 1;
+        targetAngle[1] = SERVO_SHOULDER_HOME;
+        servoReached[1] = (curAngle[1] == targetAngle[1]);
+        camLog("Elbow clearance hazir -> Shoulder home");
+    } else if (homeStage == 1 && curAngle[1] == SERVO_SHOULDER_HOME) {
+        // shoulder oturdu -> elbow asagi (final) + base/gripper
+        homeStage = 2;
         targetAngle[0] = SERVO_BASE_HOME;
         targetAngle[2] = SERVO_ELBOW_HOME;
         targetAngle[3] = SERVO_GRIPPER_HOME;
         servoReached[0] = (curAngle[0] == targetAngle[0]);
         servoReached[2] = (curAngle[2] == targetAngle[2]);
         servoReached[3] = (curAngle[3] == targetAngle[3]);
-        camLog("Shoulder hazir -> Base/Elbow/Gripper baslatildi");
-    } else if (homeStage == 1 &&
+        camLog("Shoulder hazir -> Base/Elbow(asagi)/Gripper");
+    } else if (homeStage == 2 &&
                curAngle[0] == SERVO_BASE_HOME &&
                curAngle[2] == SERVO_ELBOW_HOME &&
                curAngle[3] == SERVO_GRIPPER_HOME) {

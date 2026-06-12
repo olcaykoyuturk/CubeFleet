@@ -116,7 +116,11 @@
 
 #define SERVO_ELBOW_MIN      0     // TEST: limit kaldirildi (4->0)
 #define SERVO_ELBOW_MAX    180     // TEST: limit kaldirildi (153->180)
-#define SERVO_ELBOW_HOME    40     // shoulder hazir olunca
+#define SERVO_ELBOW_HOME    40     // shoulder hazir olunca ALCAK (final)
+#define SERVO_ELBOW_CLEAR  100     // HOME oncesi clearance: kol AGV ustunde,
+                                   // elbow alcaktayken shoulder donerse sikisir;
+                                   // once elbow buraya YUKSELIR, shoulder oturur,
+                                   // SONRA elbow HOME'a (asagi) iner
 
 #define SERVO_GRIPPER_MIN    0
 #define SERVO_GRIPPER_MAX  180     // TEST: limit kaldirildi (160->180)
