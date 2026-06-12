@@ -264,6 +264,17 @@ class PickupTest(ctk.CTk):
                       ).pack(side="left", expand=True, fill="x", padx=1)
         ctk.CTkButton(left, text="↺ sıfırla", width=70, fg_color="#555",
                       command=self._trim_reset).pack(anchor="w", pady=1)
+        # GRIP ACI: miknatis egik oturup kupun gerisine dusuyorsa bilek acisini
+        # ayarla (1° adim). "yukarı" = miknatis ucu kalkar (efektif aci artar).
+        grow = ctk.CTkFrame(left, fg_color="transparent")
+        grow.pack(fill="x", pady=1)
+        ctk.CTkLabel(grow, text="grip açı", width=56).pack(side="left")
+        ctk.CTkButton(grow, text="⬆ yukarı", width=80, fg_color="#46a",
+                      command=lambda: self._trim("grab_gamma_off", 1.0)
+                      ).pack(side="left", expand=True, fill="x", padx=1)
+        ctk.CTkButton(grow, text="⬇ aşağı", width=80, fg_color="#46a",
+                      command=lambda: self._trim("grab_gamma_off", -1.0)
+                      ).pack(side="left", expand=True, fill="x", padx=1)
         self._refresh_trim()
 
         self.status = ctk.CTkLabel(left, text="durum: IDLE", font=("", 12, "bold"),
@@ -285,21 +296,21 @@ class PickupTest(ctk.CTk):
 
     def _trim_reset(self):
         auto = self.pickup_cfg.setdefault("autonomous", {})
-        auto["aim_trim_fwd"] = 0.0
-        auto["aim_trim_lat"] = 0.0
-        if self.pc is not None:
-            self.pc._cfg["aim_trim_fwd"] = 0.0
-            self.pc._cfg["aim_trim_lat"] = 0.0
+        for k in ("aim_trim_fwd", "aim_trim_lat", "grab_gamma_off"):
+            auto[k] = 0.0
+            if self.pc is not None:
+                self.pc._cfg[k] = 0.0
         self._refresh_trim()
         self._save_cfg()
-        self.log("🎯 trim sıfırlandı")
+        self.log("🎯 trim + grip açısı sıfırlandı")
 
     def _refresh_trim(self):
         auto = self.pickup_cfg.get("autonomous", {}) or {}
         f = float(auto.get("aim_trim_fwd", 0) or 0)
         la = float(auto.get("aim_trim_lat", 0) or 0)
+        ga = float(auto.get("grab_gamma_off", 0) or 0)
         self.trim_lbl.configure(
-            text=f"ileri {f:+g} cm   yan {la:+g} cm (sağ +)")
+            text=f"ileri {f:+g} cm   yan {la:+g} cm (sağ +)   grip {ga:+g}°")
 
     def _slider(self, parent, idx, name):
         var = self.arm_servo_vars[AGV][idx]

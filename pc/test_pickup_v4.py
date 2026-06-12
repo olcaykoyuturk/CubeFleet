@@ -228,6 +228,16 @@ for (x, y) in ((0.0, 11.0), (3.0, 14.0), (-4.0, 12.0)):
         ok_round = False
 assert_true("ışın-zemin roundtrip (3 nokta, <1.5mm)", ok_round)
 assert_true("erişim dışı IK → None", MODEL.ik(0.0, 40.0, 8.0) is None)
+# GRIP ACI: tip_gamma degisince miknatis ucu yine (x,y,tip_z)'de olmali ama
+# L3 acisi istenen gamma'da (egik oturma ayari)
+gtgt = MODEL.ik(1.0, 13.0, 8.0, tip_gamma=-85.0)
+assert_true("eğik grip IK çözüm", gtgt is not None)
+if gtgt:
+    gm = MODEL.magnet_world(gtgt)
+    assert_close("eğik gripte uç yine hedefte x", gm[0], 1.0, 0.5)
+    assert_close("eğik gripte uç yine hedefte y", gm[1], 13.0, 0.5)
+    assert_close("eğik gripte uç yine hedefte z", gm[2], 8.0, 0.5)
+    assert_close("L3 açısı tip_gamma'da", MODEL.fk(gtgt)["gamma"], -85.0, 3.0)
 m2 = ArmModel({**KIN, "sh_pts": []})
 assert_true("eksik referans missing() listesinde",
             any("L1" in s for s in m2.missing()), m2.missing())

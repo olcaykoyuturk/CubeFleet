@@ -154,6 +154,10 @@ class PickupController:
         # miknatis kupun TAM ortasina (buton kupe basacak) iner. pickup_test
         # nudge butonlariyla 0.3'er ayarlanir.
         "aim_trim_fwd": 0.0, "aim_trim_lat": 0.0,
+        # GRIP ACI INCE AYAR: IK miknatisi -90° (tam asagi) hedefler; grip
+        # kalibrasyonu 1-2° kayuksa miknatis egik oturup kupun gerisine duser.
+        # grab_gamma_off ile efektif aci -90+off; pickup_test ±1° nudge.
+        "grab_gamma_off": 0.0,
         # --- hareket/olcum ---
         "max_step_deg": 2, "pickup_speed_ms": 40,
         "tick_ms": 150, "det_stale_s": 0.7,
@@ -684,9 +688,10 @@ class PickupController:
         cube = float(self.model.c.get("cube_cm") or 4.0)
         hov = float(self._cfg["hover_cm"])
         # yuksekten alcaga: hover_cm, 0.66x, 0.33x, sonra dogrudan temas
+        gamma = -90.0 + float(self._cfg.get("grab_gamma_off", 0) or 0)
         for frac in (1.0, 0.66, 0.33, 0.0):
             h = hov * frac
-            tgt = self.model.ik(x, y, cube + h, current=self.cmd)
+            tgt = self.model.ik(x, y, cube + h, current=self.cmd, tip_gamma=gamma)
             if tgt is not None and self._envelope_ok(tgt):
                 self._tgt = tgt
                 self._h = h
@@ -841,7 +846,9 @@ class PickupController:
             next_h = max(float(self._cfg["floor_cm"]),
                          self._h - float(self._cfg["descend_step_cm"]))
             x, y = self._aimed_xy(self._cube[0], self._cube[1])
-            tgt = self.model.ik(x, y, cube_cm + next_h, current=self.cmd)
+            gamma = -90.0 + float(self._cfg.get("grab_gamma_off", 0) or 0)
+            tgt = self.model.ik(x, y, cube_cm + next_h, current=self.cmd,
+                                tip_gamma=gamma)
             # Daha alcak hedef IK/zarf disindaysa: ABA ETME — burasi inebildigimiz
             # EN ALT nokta; miknatis aciksa kup cekilir, butonu bekle (grace).
             if tgt is None or not self._envelope_ok(tgt):

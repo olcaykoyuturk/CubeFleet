@@ -427,13 +427,19 @@ class ArmModel:
 
     # ------------------------------------------------------------------ IK
     def ik(self, x: float, y: float, tip_z: float,
-           current=None) -> Optional[list]:
-        """Miknatis ucu (x, y, tip_z)'de ve TAM ASAGI bakacak sekilde
-        [s0, s1, s2, s3]. Iki dirsek cozumunden 0..180 servo bandina dusenler
-        arasindan mevcuda en yakini secilir. Erisim disi -> None."""
+           current=None, tip_gamma: float = -90.0) -> Optional[list]:
+        """Miknatis ucu (x, y, tip_z)'de ve L3 mutlak acisi tip_gamma olacak
+        sekilde [s0, s1, s2, s3]. tip_gamma=-90 = miknatis tam asagi (varsayilan);
+        kullanici grab acisini ±1-2° ayarlayinca miknatis yuzu kupe tam oturur.
+        Iki dirsek cozumunden 0..180 servo bandina dusenler arasindan mevcuda en
+        yakini secilir. Erisim disi -> None."""
         yaw = math.degrees(math.atan2(x, y))
         rt = math.hypot(x, y)
-        Wr, Wz = rt, tip_z + self._f("L3")
+        gr = tip_gamma * D2R
+        L3 = self._f("L3")
+        # bilek konumu: tip = wrist + L3*(cos gamma, sin gamma) (duzlemde)
+        Wr = rt - L3 * math.cos(gr)
+        Wz = tip_z - L3 * math.sin(gr)
         dr, dz = Wr - self._f("R0"), Wz - self._f("H0")
         L1, L2 = self._f("L1"), self._f("L2")
         d2 = dr * dr + dz * dz
@@ -447,7 +453,7 @@ class ArmModel:
             a_deg = math.degrees(a)
             b_rel = math.degrees(q2)
             b_abs = a_deg + b_rel
-            g_rel = -90.0 - b_abs
+            g_rel = tip_gamma - b_abs
             try:
                 servos = [self._srv("base", yaw), self._srv("sh", a_deg),
                           self._srv("el", b_abs if self.c.get("el_abs") else b_rel),
