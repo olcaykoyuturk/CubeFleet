@@ -1898,11 +1898,18 @@ class AGVControlApp(ctk.CTk):
         if not c.next_ or c.next_ == c.from_:
             return
 
-        # Dedup — ayni (from, next, after) tekrar gonderme
+        # Dedup — ayni (from, next, after) tekrar gonderme. EXPIRY (FP-16):
+        # komut WS'te kaybolur/firmware reddederse hopComplete asla gelmez;
+        # suresiz dedup ayni hop'un bir daha gonderilmesini engelliyordu →
+        # KALICI stall. Eski kayit (>3 sn) gecersiz sayilir → watchdog nabzi
+        # ayni komutu yeniden gonderir (firmware idempotent: ayni hop'u
+        # yurutuyorsa sameHop/race-guard ile zararsiz).
         key = (c.from_, c.next_, c.after_)
-        if self._last_dispatched_hop.get(agv_id) == key:
+        prev = self._last_dispatched_hop.get(agv_id)
+        now = time.time()
+        if prev is not None and prev[0] == key and now - prev[1] < 3.0:
             return
-        self._last_dispatched_hop[agv_id] = key
+        self._last_dispatched_hop[agv_id] = (key, now)
 
         m = self.fleet_planner.missions.get(agv_id)
         mpath = " -> ".join(m.path) if m else "(yok)"
@@ -1934,6 +1941,9 @@ class AGVControlApp(ctk.CTk):
         t_react = time.time() if debug else 0.0
         pos_before  = m.pos
         path_before = list(m.path)
+        # Hop bitti — dedup kaydini temizle ki ayni node'a tekrar ugrayan
+        # rotalarda ayni (from,next) ciftinin yeniden gonderimi engellenmesin
+        self._last_dispatched_hop.pop(agv_id, None)
         self.fleet_planner.on_hop_complete(agv_id, node)
         # Log: pos guncellemesi + replan tetiklendiyse goster
         m = self.fleet_planner.missions.get(agv_id)

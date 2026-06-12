@@ -74,6 +74,13 @@ class Mission:
     yield_to:          Optional[str] = None  # hangi AGV'ye yol veriyoruz
     yield_park_node:   Optional[str] = None  # nereye yan park ettik
     yield_return_node: Optional[str] = None  # park sonrasi dondugumuz node
+    yield_wait_ticks:  int           = 0     # park'ta/yolda kac tick bekledik (timeout)
+    # IN-FLIGHT hop: dispatch edilen (from, next) — hopComplete gelene kadar
+    # planner YENI karar VERMEZ, ayni komutu yeniden uretir (executor dedup'lar).
+    # Gercek dunyada firmware hareket halindeyken yeni hop'u reddeder; planner'in
+    # mid-flight karar degistirmesi (orn. YIELD'e gecmesi) state tutarsizligi
+    # yaratiyordu. hopComplete / pozisyon degisimi inflight'i temizler.
+    inflight: Optional[Tuple[str, str]] = None
 
     def __post_init__(self):
         if not self.pos:
@@ -163,6 +170,16 @@ class ReservationTable:
 
 
 class FleetPlanner:
+    # Anti-starvation: bir AGV bu kadar tick ardisik WAIT alirsa onceligi
+    # kademeli artar (fifo_order efektif olarak duser). Esik mevcut tum
+    # "done" testlerindeki en uzun bekleme suresinin (deadlock_ticks<=8)
+    # ustundedir → tek-tick davranisi ve sim sonuclari degismez.
+    _STARVE_THRESHOLD = 8
+    # YIELDING'te park'ta bu kadar tick beklersek (yol veren AGV cikmadi /
+    # stall etti) yield iptal edilir, AGV normal replan'a doner. Tum test
+    # max_ticks degerlerinin (<=40) ustunde → testleri etkilemez.
+    _YIELD_TIMEOUT_TICKS = 60
+
     def __init__(self, graph: Graph):
         self.graph               = graph
         self.reservations        = ReservationTable()
@@ -174,6 +191,9 @@ class FleetPlanner:
         # diger AGV'ler icin engel sayilir.
         self.disconnected_agvs: Set[str] = set()
         self.last_known_pos:    Dict[str, str] = {}
+        # Ardisik WAIT sayaci (anti-starvation oncelik + production deadlock
+        # tespiti). tick() her cagrida gunceller.
+        self.wait_streak:       Dict[str, int] = {}
 
     # -----------------------------------------------------------------------
     # Path planning helpers
@@ -249,7 +269,11 @@ class FleetPlanner:
 
         existing = self.missions.get(agv_id)
         if start is None:
-            start = existing.pos if existing else goal
+            # FP-15: konum bilinmiyorsa son bilinen pozisyonu kullan; o da
+            # yoksa goal'e duser (anlik DONE — sessiz tuzakti, en azindan
+            # last_known_pos varsa gercek konumdan baslar).
+            start = (existing.pos if existing
+                     else self.last_known_pos.get(agv_id) or goal)
 
         # Eski mission DONE ise (parked obstacle) → temizle, yeni mission aktif olsun
         if existing is not None and existing.state == MissionState.DONE:
@@ -284,12 +308,39 @@ class FleetPlanner:
 
         return m
 
+    def cancel_mission(self, agv_id: str) -> bool:
+        """Tek bir AGV'nin aktif + kuyruktaki mission'larini iptal et ve
+        rezervasyonlarini serbest birak. _planner_clear_all'un aksine diger
+        AGV'lerin state'ine, queue'suna veya rezervasyonlarina DOKUNMAZ —
+        takili tek AGV'yi guvenle durdurmak icin (FP-09). Bir sey iptal
+        edildiyse True."""
+        had = (agv_id in self.missions
+               or any(q.agv_id == agv_id for q in self.queued))
+        self.reservations.release_all_for(agv_id)
+        self.missions.pop(agv_id, None)
+        self.queued = [q for q in self.queued if q.agv_id != agv_id]
+        self.disconnected_agvs.discard(agv_id)
+        self.last_known_pos.pop(agv_id, None)
+        self.wait_streak.pop(agv_id, None)
+        return had
+
     def set_agv_position(self, agv_id: str, node: str) -> None:
         """AGV'nin gercek konumunu sisteme bildir. Pos path disindaysa replan."""
         m = self.missions.get(agv_id)
         if m is None:
             return
+        # Gecersiz/sentinel node ('?' bilinmeyen konum) mission.pos'u BOZMASIN.
+        # Aksi halde astar('?',...) None doner, next_node kaybolur, AGV sessizce
+        # stall eder (FP-10 savunma katmani — PC tarafi da '?' filtreler).
+        if node not in self.graph.nodes:
+            return
+        if node != m.pos:
+            m.inflight = None   # pozisyon degisti — onceki hop fiilen bitti
         m.pos = node
+        # YIELDING'te park/yol node'lari path disinda olmasi NORMAL — replan
+        # path'i bozar (FP-11). Pos guncellenir, yield_step akisi yonetir.
+        if m.state == MissionState.YIELDING:
+            return
         if node not in m.path and m.goal:
             replan = self._plan_path(node, m.goal, agv_id)
             if replan and len(replan) > 1:
@@ -304,6 +355,7 @@ class FleetPlanner:
             return
         prev   = m.pos
         m.pos  = new_node
+        m.inflight = None   # hareket bitti — yeni karar verilebilir
         # Eski node + edge rezervasyonlarini bosalt
         if prev != new_node:
             if self.reservations.node_owner.get(prev) == agv_id:
@@ -355,16 +407,72 @@ class FleetPlanner:
         commands: Dict[str, HopCommand] = {}
         for m in self._prioritize_missions():
             commands[m.agv_id] = self._plan_hop(m)
+        self._update_wait_streak(commands)
         return commands
 
+    def _update_wait_streak(self, commands: Dict[str, "HopCommand"]) -> None:
+        """WAIT alan AGV'nin sayacini artir, hareket edeni sifirla. Aging
+        onceligi ve production deadlock tespiti bunu kullanir."""
+        for agv_id, c in commands.items():
+            if c.action == HopAction.WAIT:
+                self.wait_streak[agv_id] = self.wait_streak.get(agv_id, 0) + 1
+            else:
+                self.wait_streak[agv_id] = 0
+
+    def _priority_key(self, m: Mission):
+        """Siralama anahtari (kucuk = yuksek oncelik): Cargo > efektif-FIFO > ID.
+        Anti-starvation: _STARVE_THRESHOLD'u asan ardisik WAIT, fifo_order'i
+        kademeli dusurur → uzun bekleyen AGV taze olani gecer. Esik altinda
+        (wait_streak <= esik) aging=0 → davranis (not cargo, fifo, id) ile ayni."""
+        aging = max(0, self.wait_streak.get(m.agv_id, 0) - self._STARVE_THRESHOLD)
+        return (not m.has_cargo, m.fifo_order - aging, m.agv_id)
+
     def _prioritize_missions(self) -> List[Mission]:
-        """Cargo > FIFO > ID. Disconnected ve is_done atlanir."""
+        """Cargo > FIFO(+aging) > ID. Disconnected ve is_done atlanir."""
         active = [m for m in self.missions.values()
                   if not m.is_done and m.agv_id not in self.disconnected_agvs]
-        return sorted(
-            active,
-            key=lambda m: (not m.has_cargo, m.fifo_order, m.agv_id),
-        )
+        return sorted(active, key=self._priority_key)
+
+    # -----------------------------------------------------------------------
+    # Production deadlock tespiti + kurtarma (yalniz watchdog cagirir;
+    # tick akisini DEGISTIRMEZ → FleetSimulator testleri etkilenmez)
+    # -----------------------------------------------------------------------
+
+    def detect_deadlock(self, threshold: int = 6) -> bool:
+        """Aktif mission var VE hepsi `threshold` tick'tir ardisik WAIT'te mi?
+        Olay-guducu production'da bu durum kalici donma demektir (kimse
+        hareket etmiyor → hopComplete gelmiyor → tick re-invoke olmuyor)."""
+        active = [m for m in self.missions.values()
+                  if not m.is_done and m.agv_id not in self.disconnected_agvs]
+        if not active:
+            return False
+        return all(self.wait_streak.get(m.agv_id, 0) >= threshold
+                   for m in active)
+
+    def break_deadlock(self) -> Optional["HopCommand"]:
+        """Deadlock kurtarma (yalniz production watchdog cagirir): en dusuk
+        oncelikli bekleyen AGV'yi en yuksek oncelikliye yan-park ettir. Yield
+        HopCommand'i doner (caller dispatch eder); side park yoksa None
+        (UI manuel mudahale uyarsin). VERTEX-active simetrik deadlock'u
+        (>=3 AGV) ve disconnected-strand kalintilarini kirar."""
+        active = [m for m in self.missions.values()
+                  if not m.is_done and m.agv_id not in self.disconnected_agvs]
+        if len(active) < 2:
+            return None
+        ordered = sorted(active, key=self._priority_key)
+        winner  = ordered[0]
+        # FP-14: zaten YIELDING olan kurban yeniden yield edilemez (park
+        # alanlari ust uste biner, state bozulur) — dusuk oncelikli ama
+        # ACTIVE/QUEUED olan ilk adayi sec.
+        victims = [m for m in reversed(ordered[1:])
+                   if m.state != MissionState.YIELDING]
+        if not victims:
+            return None
+        victim = victims[0]
+        yc = self._begin_yield(victim, winner)
+        if yc is not None:
+            self.wait_streak[victim.agv_id] = 0
+        return yc
 
     def _plan_hop(self, m: Mission) -> HopCommand:
         """Bir mission icin sonraki hop komutunu hesapla.
@@ -386,6 +494,25 @@ class FleetPlanner:
         # YIELDING: park'a vardiysa diger AGV'yi bekle, gectiyse don.
         if m.state == MissionState.YIELDING:
             return self._plan_yield_step(m)
+
+        # IN-FLIGHT: dispatch edilmis hop henuz tamamlanmadi (gercek dunyada
+        # AGV su an o hop'u yurutuyor; firmware mid-flight yeni hop'u zaten
+        # reddeder). Karar DEGISTIRME — ayni komutu yeniden uret (executor
+        # dedup'lar; komut kaybolduysa watchdog yeniden gonderir). Cakismalar
+        # diger AGV'lerin planinda cozulur.
+        if m.inflight is not None and m.pos == m.inflight[0]:
+            nxt = m.inflight[1]
+            after = None
+            if m.pos in m.path:
+                i = m.path.index(m.pos)
+                if (i + 1 < len(m.path) and m.path[i + 1] == nxt
+                        and i + 2 < len(m.path)):
+                    after = m.path[i + 2]
+            return HopCommand(
+                agv_id=m.agv_id, action=HopAction.NORMAL,
+                from_=m.pos, next_=nxt, after_=after,
+                reason="enroute (reissue)",
+            )
 
         # Replan tetikleyici:
         #   1) path=[start] (ulasilamaz) — onceki replan basarisiz, retry
@@ -423,6 +550,7 @@ class FleetPlanner:
         self.reservations.reserve_node(m.next_node, m.agv_id)
         self.reservations.reserve_edge(m.current, m.next_node, m.agv_id)
         m.state = MissionState.ACTIVE
+        m.inflight = (m.current, m.next_node)
         return HopCommand(
             agv_id = m.agv_id,
             action = HopAction.NORMAL,
@@ -546,9 +674,8 @@ class FleetPlanner:
                 # Parked → reroute dene
                 alt = self._find_alternative_path(me, other)
                 if alt is not None and len(alt) > 1:
-                    me.path = alt
-                    return self._normal_hop(
-                        me, reason=f"reroute past parked {other.agv_id}",
+                    return self._dispatch_reroute(
+                        me, alt, reason=f"reroute past parked {other.agv_id}",
                     )
                 return HopCommand(
                     agv_id=me.agv_id, action=HopAction.WAIT,
@@ -582,9 +709,9 @@ class FleetPlanner:
                     blocked_edges={edge},
                 )
                 if alt and len(alt) > 1:
-                    me.path = alt
-                    return self._normal_hop(
-                        me, reason=f"reroute (future head-on {edge[0]}-{edge[1]})",
+                    return self._dispatch_reroute(
+                        me, alt,
+                        reason=f"reroute (future head-on {edge[0]}-{edge[1]})",
                     )
             return HopCommand(
                 agv_id=me.agv_id, action=HopAction.WAIT,
@@ -599,13 +726,43 @@ class FleetPlanner:
             reason=f"yielding to {other.agv_id}",
         )
 
+    def _dispatch_reroute(self, me: Mission, alt: List[str],
+                          reason: str) -> HopCommand:
+        """Reroute sonrasi guvenli dispatch:
+          - FP-06: eski path'in HAYALET rezervasyonlarini birak (release_all_for),
+            current'i geri tut. Aksi halde onceki tick'in eski next_node'u
+            node_owner'da kalip baska AGV'nin _find_side_park secimini bozar.
+          - FP-07: yeni path'i ata; eger yeni path IMMEDIATE bir cakismaya
+            (parked AGV tam next'te VEYA direct head-on) sokuyorsa ve oncelik
+            bizde degilse NORMAL yerine WAIT'e dus — eski path'in conflict
+            tipiyle commit edilmis tek-tick yanlis dispatch'i onler. Future
+            (uzak) cakismalar bir sonraki tick yeniden degerlendirilir."""
+        self.reservations.release_all_for(me.agv_id)
+        if me.current:
+            self.reservations.reserve_node(me.current, me.agv_id)
+        me.path = alt
+        re = self._detect_conflict(me)
+        if re.type != ConflictType.NONE:
+            other2 = self.missions.get(re.agv_b)
+            imminent = other2 is not None and (
+                (re.type == ConflictType.VERTEX
+                 and other2.state == MissionState.DONE)
+                or (re.type == ConflictType.EDGE_SWAP
+                    and other2.current == me.next_node)
+            )
+            if (imminent and other2 is not None
+                    and not self._compute_priority(me, other2)):
+                return HopCommand(
+                    agv_id=me.agv_id, action=HopAction.WAIT, from_=me.current,
+                    reason=f"reroute hala cakisiyor {re.agv_b}",
+                )
+        return self._normal_hop(me, reason=reason)
+
     def _compute_priority(self, a: Mission, b: Mission) -> bool:
-        """a, b'den oncelikli mi? Cargo > FIFO > ID."""
-        if a.has_cargo != b.has_cargo:
-            return a.has_cargo
-        if a.fifo_order != b.fifo_order:
-            return a.fifo_order < b.fifo_order
-        return a.agv_id < b.agv_id
+        """a, b'den oncelikli mi? Cargo > FIFO(+aging) > ID. _priority_key ile
+        tutarli — uzun bekleyen loser zamanla onceligi kazanir (anti-starvation,
+        AGV_2 sistematik dezavantajini da kirar)."""
+        return self._priority_key(a) < self._priority_key(b)
 
     def _find_alternative_path(
         self, me: Mission, other: Mission,
@@ -669,6 +826,14 @@ class FleetPlanner:
                 other_path.add(n)
 
         blocked = self.reservations.blocked_nodes_for(me.agv_id)
+        # FP-13: kopuk AGV'lerin son bilinen konumlari rezervasyon tablosunda
+        # OLMAYABILIR (kopma aninda node release edilmis olabilir) — yan park
+        # adayi olarak secilirse fiziksel carpisma. Acikca disla.
+        for d in self.disconnected_agvs:
+            if d != me.agv_id:
+                pos = self.last_known_pos.get(d)
+                if pos:
+                    blocked = blocked | {pos}
 
         candidates: List[Tuple[int, str]] = []
         for n in neighbors:
@@ -693,6 +858,8 @@ class FleetPlanner:
         me.yield_to          = other.agv_id
         me.yield_park_node   = park
         me.yield_return_node = me.current
+        me.yield_wait_ticks  = 0
+        me.inflight          = (me.current, park)
         # Rezervasyon: current bos, park + edge tutulu
         if self.reservations.node_owner.get(me.current) == me.agv_id:
             del self.reservations.node_owner[me.current]
@@ -718,35 +885,65 @@ class FleetPlanner:
         other = self.missions.get(m.yield_to) if m.yield_to else None
 
         if park is None or ret is None:
-            return HopCommand(
-                agv_id=m.agv_id, action=HopAction.WAIT,
-                from_=m.current, reason="yield state corrupt",
-            )
+            return self._cancel_yield(m, "yield state corrupt")
 
         if m.pos != park:
-            return HopCommand(
-                agv_id=m.agv_id, action=HopAction.WAIT,
-                from_=m.current, reason="yield enroute to park",
-            )
+            # Parka henuz varilmadi. UC durum (FP-12 — kayip/ret komut kurtarma):
+            #   a) pos == return_node: hic kipirdamadik — YIELD komutu kaybolmus
+            #      ya da firmware reddetmis olabilir → komutu YENIDEN URET
+            #      (executor dedup + expiry ile spam'siz yeniden gonderir).
+            #      Cok uzun surduyse yield iptal, normal plana don.
+            #   b) pos baska bir node: surukleme/eski hop tamamlanmis — yield
+            #      gecersiz, iptal et (park artik komsu olmayabilir).
+            if m.pos == ret:
+                m.yield_wait_ticks += 1
+                if m.yield_wait_ticks >= self._YIELD_TIMEOUT_TICKS:
+                    return self._cancel_yield(m, "yield enroute timeout")
+                return HopCommand(
+                    agv_id=m.agv_id, action=HopAction.YIELD,
+                    from_=m.pos, next_=park, after_=None,
+                    reason=f"side park for {m.yield_to} (reissue)",
+                )
+            return self._cancel_yield(m, f"yield drift ({m.pos})")
 
         # Diger AGV gecti mi?
         if not self._is_other_clear_of(other, ret):
+            # FP-17b: yol verilen AGV donus node'una KALICI park ettiyse (DONE)
+            # beklemek anlamsiz — hemen park'tan yeniden planla (alternatif rota).
+            if (other is not None and other.is_done
+                    and other.current == ret):
+                return self._resume_from_park(m)
+            # FP-05: yol veren AGV cikmadan cok uzun beklersek (kopma / stall)
+            # sonsuza dek strand kalmamak icin yield'i bitir, PARK'tan yeniden
+            # planla (kor donus YOK — FP-17).
+            m.yield_wait_ticks += 1
+            if m.yield_wait_ticks >= self._YIELD_TIMEOUT_TICKS:
+                return self._resume_from_park(m)
             return HopCommand(
                 agv_id=m.agv_id, action=HopAction.WAIT,
                 from_=m.current,
                 reason=f"yield waiting {m.yield_to} to clear {ret}",
             )
 
-        return self._return_from_yield(m)
+        return self._resume_from_park(m)
 
     def _is_other_clear_of(
         self, other: Optional[Mission], node: str,
     ) -> bool:
-        """other AGV node'dan uzaklasti mi? other yoksa veya is_done ise clear."""
-        if other is None or other.is_done:
+        """other AGV node'dan uzaklasti mi? other yoksa clear.
+        FP-17: is_done CLEAR DEMEK DEGIL — other tam donus node'unda PARK
+        etmis olabilir (hedefi orasiydi); kor donus park etmis aracin ustune
+        surerdi. Once konum kontrolu, sonra is_done."""
+        if other is None:
             return True
-        if other.current == node:        # hala orada
+        if other.current == node:        # hala orada (park etmis olsa bile!)
             return False
+        if other.is_done:
+            return True
+        # FP-05: yol verdigimiz AGV koptuysa hareket etmez ama is_done de olmaz —
+        # (baska yerdeyse) clear say, aksi halde yield eden sonsuza dek strand.
+        if other.agv_id in self.disconnected_agvs:
+            return True
         if other.next_node == node:      # oraya geliyor
             return False
         # other'in kalan path'i node'dan geciyor mu?
@@ -756,29 +953,58 @@ class FleetPlanner:
                 return False
         return True
 
-    def _return_from_yield(self, m: Mission) -> HopCommand:
-        """Yield bitti — park'tan return_node'a don, state temizle.
-        Sonraki tick normal _plan_hop calisir."""
-        park = m.pos
-        ret  = m.yield_return_node or m.start
-        # Park release, return reserve
-        if self.reservations.node_owner.get(park) == m.agv_id:
-            del self.reservations.node_owner[park]
-        self.reservations.reserve_node(ret, m.agv_id)
-        self.reservations.reserve_edge(park, ret, m.agv_id)
-        # State temizle — return hop tamamlaninca normal akisa donecek
+    def _cancel_yield(self, m: Mission, reason: str) -> HopCommand:
+        """Yield'i iptal et (parka varilamadan: kayip komut / drift / timeout).
+        Park rezervasyonlari birakilir, mevcut pos tutulur, state ACTIVE'e
+        doner — bir SONRAKI tick normal _plan_hop yeniden karar verir (replan
+        dahil). Bu tick WAIT doner (guvenli no-op)."""
+        park = m.yield_park_node
+        ret  = m.yield_return_node
+        if park is not None:
+            if self.reservations.node_owner.get(park) == m.agv_id:
+                del self.reservations.node_owner[park]
+            if ret is not None:
+                ekey = edge_key(ret, park)
+                if self.reservations.edge_owner.get(ekey) == m.agv_id:
+                    del self.reservations.edge_owner[ekey]
+        self.reservations.reserve_node(m.pos, m.agv_id)
         m.state             = MissionState.ACTIVE
         m.yield_to          = None
         m.yield_park_node   = None
         m.yield_return_node = None
+        m.yield_wait_ticks  = 0
+        m.inflight          = None
+        # Pos path disina dustuyse (drift) replan
+        if m.pos not in m.path and m.goal:
+            replan = self._plan_path(m.pos, m.goal, m.agv_id)
+            if replan and len(replan) > 1:
+                m.path = replan
         return HopCommand(
-            agv_id = m.agv_id,
-            action = HopAction.NORMAL,
-            from_  = park,
-            next_  = ret,
-            after_ = None,
-            reason = "yield return",
+            agv_id=m.agv_id, action=HopAction.WAIT,
+            from_=m.pos, reason=f"yield iptal: {reason}",
         )
+
+    def _resume_from_park(self, m: Mission) -> HopCommand:
+        """Yield bitti — PARK'tan yola devam. ESKI davranis return_node'a KOR
+        donusdu (FP-17: yol verilen AGV tam oraya park ettiyse ustune surerdi).
+        Simdi: state temizlenir, path PARK'tan hedefe yeniden planlanir ve ayni
+        tick icinde normal _plan_hop akisi calisir — cakisma kontrolleri dahil
+        (donus node'u doluysa alternatif rota, yoksa WAIT)."""
+        park = m.pos
+        m.state             = MissionState.ACTIVE
+        m.yield_to          = None
+        m.yield_park_node   = None
+        m.yield_return_node = None
+        m.yield_wait_ticks  = 0
+        m.inflight          = None
+        replan = self._plan_path(park, m.goal, m.agv_id)
+        if replan and len(replan) > 1:
+            m.path = replan
+        elif park not in m.path:
+            m.path = [park]    # ulasilamaz — _plan_hop her tick replan dener
+        # Tek seviyeli yeniden giris: state artik ACTIVE, _plan_hop normal
+        # akisi (conflict detect + dispatch) calistirir.
+        return self._plan_hop(m)
 
 
 class FleetSimulator:

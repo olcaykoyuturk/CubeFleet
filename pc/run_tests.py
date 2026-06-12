@@ -24,7 +24,8 @@ TEST_FILES = [
     ("integration",   "test_integration.py"),
     ("waypoint_sync", "test_waypoint_sync.py"),   # PC<->firmware graf senkron
     ("wire_protocol", "test_wire_protocol.py"),   # setHop govde sozlesmesi
-    ("pickup_v3",     "test_pickup_v3.py"),       # kapma v3 sentetik kapali dongu
+    ("pickup_v4",     "test_pickup_v4.py"),       # kapma v4 kinematik kapali dongu
+    ("fleet_timed",   "test_fleet_timed.py"),     # zamanli gercek-dunya filo senaryolari
 ]
 
 
