@@ -37,6 +37,7 @@ tahmini/hedef/karar), her servo komutu, IK/zarf engelleri, bitis nedeni.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from typing import Optional, TextIO
@@ -148,6 +149,11 @@ class PickupController:
         "floor_cm": -1.5,         # tip_z = kup_ustu + h; h buraya kadar (bastirma)
         "track_clamp_cm": 0.5,    # DESCEND'de tahmin guncelleme adimi siniri
         "grace_ticks": 8,         # zemine inildi, butonsuz bekleme
+        # INCE AYAR: miknatis ucu ile kinematik model arasindaki kucuk kayma
+        # (montaj/L3 toleransi). IK hedefi kup yonunde ileri/yana kaydirilir ->
+        # miknatis kupun TAM ortasina (buton kupe basacak) iner. pickup_test
+        # nudge butonlariyla 0.3'er ayarlanir.
+        "aim_trim_fwd": 0.0, "aim_trim_lat": 0.0,
         # --- hareket/olcum ---
         "max_step_deg": 2, "pickup_speed_ms": 40,
         "tick_ms": 150, "det_stale_s": 0.7,
@@ -653,6 +659,19 @@ class PickupController:
         self._refresh()
 
     # ------------------------------------------------------------------- adimlar
+    def _aimed_xy(self, x: float, y: float):
+        """IK hedefini INCE AYAR trim'iyle kaydir: miknatis ucu kinematik
+        modelden biraz kaymis olabilir; kup yonunde ileri (+fwd) ve yana (+lat
+        sag) kaydirarak miknatis kupun TAM ortasina iner (buton basar)."""
+        tf = float(self._cfg.get("aim_trim_fwd", 0) or 0)
+        tl = float(self._cfg.get("aim_trim_lat", 0) or 0)
+        if not tf and not tl:
+            return x, y
+        yaw = math.atan2(x, y)
+        fx, fy = math.sin(yaw), math.cos(yaw)      # kupe dogru (ileri)
+        lx, ly = math.cos(yaw), -math.sin(yaw)     # saga dik (lateral)
+        return x + tf * fx + tl * lx, y + tf * fy + tl * ly
+
     def _aim_target(self) -> bool:
         """Kilitli kup konumu icin hover pozunu coz -> self._tgt. Hem IK hem
         GUVENLI ZARF gecen ILK (en yuksek) hover yuksekligini secer: yakin kup
@@ -661,7 +680,7 @@ class PickupController:
         Hicbiri gecmezse False (gercekten erisilemez)."""
         if self.model is None or self._cube is None:
             return False
-        x, y = self._cube
+        x, y = self._aimed_xy(*self._cube)
         cube = float(self.model.c.get("cube_cm") or 4.0)
         hov = float(self._cfg["hover_cm"])
         # yuksekten alcaga: hover_cm, 0.66x, 0.33x, sonra dogrudan temas
@@ -821,7 +840,7 @@ class PickupController:
                 return
             next_h = max(float(self._cfg["floor_cm"]),
                          self._h - float(self._cfg["descend_step_cm"]))
-            x, y = self._cube
+            x, y = self._aimed_xy(self._cube[0], self._cube[1])
             tgt = self.model.ik(x, y, cube_cm + next_h, current=self.cmd)
             # Daha alcak hedef IK/zarf disindaysa: ABA ETME — burasi inebildigimiz
             # EN ALT nokta; miknatis aciksa kup cekilir, butonu bekle (grace).

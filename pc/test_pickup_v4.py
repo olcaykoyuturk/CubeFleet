@@ -377,6 +377,23 @@ if logpath and os.path.exists(logpath):
 assert_true("settle 'arm' yolu kullanıldı",
             any(t.get("settle") == "arm" for t in ticks))
 
+# ---------------------------------------------------------------- 3b. aim trim
+print("\n[3b] mıknatıs merkez trim")
+cfg = make_cfg()
+cfg["autonomous"]["aim_trim_fwd"] = 1.0
+cfg["autonomous"]["aim_trim_lat"] = 0.5
+pcx = PickupController(FakeApp(cfg, START), "T")
+pcx._cfg = {**PickupController.DEFAULTS, **cfg["autonomous"]}
+pcx.model = ArmModel(KIN)
+# kup tam ileride (x=0): ileri trim y'yi artirmali, yan trim x'i artirmali
+ax, ay = pcx._aimed_xy(0.0, 14.0)
+assert_close("trim: ileri hedefi uzaklaştırır", ay, 15.0, 0.01)
+assert_close("trim: yan hedefi sağa kaydırır", ax, 0.5, 0.01)
+# trim yokken degismez
+pcx._cfg["aim_trim_fwd"] = 0.0
+pcx._cfg["aim_trim_lat"] = 0.0
+assert_true("trim 0 → değişmez", pcx._aimed_xy(2.0, 13.0) == (2.0, 13.0))
+
 # ---------------------------------------------------------------- 4. abort yollari
 print("\n[4] abort yolları")
 cfg = make_cfg()

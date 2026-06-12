@@ -240,10 +240,66 @@ class PickupTest(ctk.CTk):
                       command=self._single_tick).pack(side="left", expand=True,
                                                       fill="x", padx=2)
 
+        # MIKNATIS MERKEZ INCE AYAR: koşu sonrası mıknatıs küpün ortasına tam
+        # inmiyorsa, indiği YÖNE bas (mıknatısı oraya kaydırır), buton küpün
+        # tam üstüne gelene kadar 0.3'er nudge'la. Çalışan kontrolöre de uygulanır.
+        ctk.CTkLabel(left, text="🎯 MIKNATIS MERKEZ AYARI (mm)",
+                     font=("", 12, "bold")).pack(anchor="w", pady=(8, 0))
+        self.trim_lbl = ctk.CTkLabel(left, text="", font=("", 11),
+                                     text_color="#9c9")
+        self.trim_lbl.pack(anchor="w")
+        trow = ctk.CTkFrame(left, fg_color="transparent")
+        trow.pack(fill="x", pady=1)
+        ctk.CTkButton(trow, text="⬆ İleri", width=70, fg_color="#46a",
+                      command=lambda: self._trim("aim_trim_fwd", 0.3)
+                      ).pack(side="left", expand=True, fill="x", padx=1)
+        ctk.CTkButton(trow, text="⬇ Geri", width=70, fg_color="#46a",
+                      command=lambda: self._trim("aim_trim_fwd", -0.3)
+                      ).pack(side="left", expand=True, fill="x", padx=1)
+        ctk.CTkButton(trow, text="⬅ Sol", width=70, fg_color="#46a",
+                      command=lambda: self._trim("aim_trim_lat", -0.3)
+                      ).pack(side="left", expand=True, fill="x", padx=1)
+        ctk.CTkButton(trow, text="➡ Sağ", width=70, fg_color="#46a",
+                      command=lambda: self._trim("aim_trim_lat", 0.3)
+                      ).pack(side="left", expand=True, fill="x", padx=1)
+        ctk.CTkButton(left, text="↺ sıfırla", width=70, fg_color="#555",
+                      command=self._trim_reset).pack(anchor="w", pady=1)
+        self._refresh_trim()
+
         self.status = ctk.CTkLabel(left, text="durum: IDLE", font=("", 12, "bold"),
                                    text_color="#ffd24a", justify="left",
                                    wraplength=300)
         self.status.pack(anchor="w", pady=(6, 2))
+
+    def _trim(self, key: str, delta: float):
+        """Mıknatıs merkez trim'i: indiği yöne bas (mıknatısı oraya kaydırır).
+        Config'e yazar, çalışan kontrolöre de anında uygular, kalıcı kaydet için
+        💾 gerekir değil — direkt diske yazalım ki koşular arası kalsın."""
+        auto = self.pickup_cfg.setdefault("autonomous", {})
+        auto[key] = round(float(auto.get(key, 0) or 0) + delta, 2)
+        if self.pc is not None:
+            self.pc._cfg[key] = auto[key]
+        self._refresh_trim()
+        self._save_cfg()
+        self.log(f"🎯 {key} = {auto[key]:+g} cm")
+
+    def _trim_reset(self):
+        auto = self.pickup_cfg.setdefault("autonomous", {})
+        auto["aim_trim_fwd"] = 0.0
+        auto["aim_trim_lat"] = 0.0
+        if self.pc is not None:
+            self.pc._cfg["aim_trim_fwd"] = 0.0
+            self.pc._cfg["aim_trim_lat"] = 0.0
+        self._refresh_trim()
+        self._save_cfg()
+        self.log("🎯 trim sıfırlandı")
+
+    def _refresh_trim(self):
+        auto = self.pickup_cfg.get("autonomous", {}) or {}
+        f = float(auto.get("aim_trim_fwd", 0) or 0)
+        la = float(auto.get("aim_trim_lat", 0) or 0)
+        self.trim_lbl.configure(
+            text=f"ileri {f:+g} cm   yan {la:+g} cm (sağ +)")
 
     def _slider(self, parent, idx, name):
         var = self.arm_servo_vars[AGV][idx]
