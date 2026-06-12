@@ -11,6 +11,15 @@
 #define TURN_SPEED_SLOW           20   // Çizgi yaklaşınca yavaşlama hızı (hassas hizalama)
 #define TURN_TIMEOUT            5000   // Maksimum dönüş süresi (ms) — ağır araç biraz uzun döner
 
+// ===== Öğrenilen Süreli Dönüş (faceDir — küp yönüne, çizgisiz 90°) =====
+// Her başarılı SENSÖRLÜ 90° dönüş segmentinin süresi ölçülür, EMA ile ortalama
+// tutulur. Çizgi OLMAYAN yöne (küp tarafı) dönerken motor bu ortalama süre
+// kadar döner ("ortalama 90°'de dur"). Default yalnız ilk sensörlü dönüşe
+// kadar geçerli — sonrasında sistem kendini kalibre eder (pil/zemin adaptif).
+#define TIMED_TURN90_DEFAULT_MS 1100
+#define TIMED_TURN90_MIN_MS      300   // ölçüm clamp alt sınırı (sahte kısa ölçüm)
+#define TIMED_TURN90_MAX_MS     4000   // ölçüm clamp üst sınırı (takılmalı dönüş)
+
 // ===== Debounce =====
 #define LINE_EXIT_MS   200   // Çizgiden çıkış: bu kadar ms çizgi görünmemeli
 #define LINE_FIND_MS    25   // Çizgi bulundu: bu kadar ms kesintisiz görünmeli

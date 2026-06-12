@@ -130,6 +130,14 @@ static void handleServerMessage(uint8_t* payload, size_t length) {
         return;
     }
 
+    // --- Kup yonune don (faceDir) ---
+    // payload: {type:"faceDir", agvId, dir:"N"|"E"|"S"|"W"}
+    // Yalniz NAV_IDLE'da kabul edilir; bitince faceComplete doner.
+    if (strcmp(type, "faceDir") == 0) {
+        const char* dir = doc["dir"];
+        if (dir && dir[0]) navCommandFaceDir(dir[0]);
+        return;
+    }
 }
 
 // =============================================================================
@@ -318,6 +326,21 @@ void sendHopComplete(char node, const char* heading) {
     doc["node"]    = nodeStr;
     if (heading && heading[0]) doc["heading"] = heading;
     // PC debug timing: firmware uptime ms (PC latency olcumu).
+    doc["time"]    = millis();
+    String msg; serializeJson(doc, msg);
+    webSocket.sendTXT(msg);
+}
+
+// faceDir tamamlandi: yeni heading + bulunulan node PC'ye bildirilir.
+// PC bunu alip otonom kapma akisini (kamera + kol) baslatabilir.
+void sendFaceComplete(char node, const char* heading) {
+    if (!wsConnected) return;
+    StaticJsonDocument<128> doc;
+    doc["type"]    = "faceComplete";
+    doc["agvId"]   = AGV_ID;
+    char nodeStr[2] = { node, 0 };
+    doc["node"]    = nodeStr;
+    if (heading && heading[0]) doc["heading"] = heading;
     doc["time"]    = millis();
     String msg; serializeJson(doc, msg);
     webSocket.sendTXT(msg);

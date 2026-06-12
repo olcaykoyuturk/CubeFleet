@@ -14,6 +14,7 @@ Server protokolu (firmware/server/server.ino):
         {type: "setSpeed",         agvId: "AGV_1", speed: 35}
         {type: "command",          agvId: "AGV_1", command: "start|stop|calibrate"}
         {type: "applyCalibration", agvId: "AGV_1", sensorMin: [...8], sensorMax: [...8]}
+        {type: "faceDir",          agvId: "AGV_1", dir: "N|E|S|W"}  # kup yonune don
         {type: "pcHeartbeat"}      # her 1.5sn (firmware AGV disconnect tespiti)
         {type: "getList"}
 
@@ -25,6 +26,7 @@ Server protokolu (firmware/server/server.ino):
                             sonarDist, obstacle, sensors[8]}
         {type: "log",             agvId, message, time}
         {type: "calibrationData", agvId, sensorMin: [...8], sensorMax: [...8]}
+        {type: "faceComplete",    agvId, node, heading, time}  # faceDir bitti
 """
 
 import json
@@ -115,6 +117,17 @@ class HopCompleteEvent:
     heading:   str   = ""
     time_ms:   int   = 0       # AGV firmware uptime ms (yollarken)
     wall_time: float = 0.0     # PC wall clock (receive zamani)
+
+
+@dataclass
+class FaceCompleteEvent:
+    """AGV faceDir donusunu bitirdi (kup yonune bakti). UI bunu alip otonom
+    kapma akisini baslatabilir. heading firmware string'i (KUZEY/DOGU/...)."""
+    agvId:     str
+    node:      str
+    heading:   str   = ""
+    time_ms:   int   = 0
+    wall_time: float = 0.0
 
 
 class AGVClient:
@@ -314,6 +327,16 @@ class AGVClient:
             )
             self.events.put(("hop_complete", ev))
 
+        elif t == "faceComplete":
+            ev = FaceCompleteEvent(
+                agvId     = doc.get("agvId", ""),
+                node      = str(doc.get("node", "")),
+                heading   = str(doc.get("heading", "")),
+                time_ms   = int(doc.get("time", 0)),
+                wall_time = time.time(),
+            )
+            self.events.put(("face_complete", ev))
+
     # -------------------------------------------------------------------------
     # Mesaj gonderme (UI thread'inden cagrilir)
     # -------------------------------------------------------------------------
@@ -401,6 +424,15 @@ class AGVClient:
 
     def clear_mission(self, agv_id: str) -> bool:
         return self.send_raw({"type": "clearMission", "agvId": agv_id})
+
+    def face_dir(self, agv_id: str, direction: str) -> bool:
+        """Kup yonune don: direction 'N'|'E'|'S'|'W'. Yalniz NAV_IDLE'da
+        kabul edilir; donus bitince AGV faceComplete yollar. O yonde cizgi
+        varsa sensorlu donus, yoksa ogrenilen sureyle zamanli 90° donus."""
+        d = (direction or "").strip().upper()[:1]
+        if d not in ("N", "E", "S", "W"):
+            return False
+        return self.send_raw({"type": "faceDir", "agvId": agv_id, "dir": d})
 
     # -------------------------------------------------------------------------
     # UI tarafindan polling

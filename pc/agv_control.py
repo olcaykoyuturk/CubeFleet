@@ -30,6 +30,7 @@ from waypoint_canvas     import WaypointCanvas, FleetAGVDisplay
 from stream_reader       import StreamReader
 from detector            import get_detector
 from graph               import Graph
+from cube_store          import CubeStore, free_sides, SIDE_LABELS_TR
 from fleet_planner       import (
     FleetPlanner, HopAction, HopCommand,
 )
@@ -245,7 +246,22 @@ class AGVControlApp(ctk.CTk):
         # AGV_X icin emir degismediyse atla.
         self._last_dispatched_hop: Dict[str, tuple] = {}
 
+        # ===== Kup deposu + tasima orkestrasyonu =====
+        # 4 fiziksel kup, baslangicta yeri NULL; kullanici haritadan yerlestirir
+        # (node + cizgisiz kenar), tasima sirasinda SISTEM gunceller:
+        # al → carrier=AGV; birak → yeni node+side. cubes.json'da kalici.
+        self.cube_store = CubeStore(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "cubes.json")
+        )
+        # Per-AGV aktif kup operasyonu:
+        #   {kind: "fetch"|"drop", phase, cube_id, node, side, deadline}
+        # Fazlar: GOTO (planner gorevi) → FACE (faceDir donusu) →
+        #         fetch: WARMUP (kamera+YOLO) → PICKUP (PickupController)
+        #         drop:  RELEASE (IK poz + miknatis KAPAT + HOME)
+        self.cube_ops: Dict[str, dict] = {}
+
         self._build_ui()
+        self._cubes_redraw()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(self.UI_TICK_MS, self._tick)
 
@@ -431,6 +447,9 @@ class AGVControlApp(ctk.CTk):
         self.heading_lbl = ctk.CTkLabel(cmd_frame, text="Yon: -", anchor="w")
         self.heading_lbl.pack(fill="x", padx=12, pady=(0, 6))
 
+        # Kup yonetimi (yerlestir / al / birak + manuel faceDir)
+        self._build_cube_panel(cmd_frame)
+
         # (PID + Hiz kontrolleri Sensors sekmesine tasindi — kalibrasyon
         # panelinin altinda; _build_pid_panel)
 
@@ -552,9 +571,18 @@ class AGVControlApp(ctk.CTk):
             self.detect_vars[agv_id] = ctk.BooleanVar(value=False)
 
     def _sync_stream_readers(self, visible: List[str]):
-        """visible listesi dışındaki AGV'lerin stream reader'larını kapat."""
+        """visible listesi dışındaki AGV'lerin stream reader'larını kapat.
+
+        İstisna: aktif küp operasyonu / çalışan kapma kontrolörü olan AGV'nin
+        stream'i AÇIK kalır — otonom akış (WARMUP/PICKUP) tespit verisine
+        muhtaç; kullanıcı bu sırada başka AGV'ye geçebilmeli."""
+        keep = set(visible)
+        keep.update(self.cube_ops.keys())
+        for a, pc in self.auto_pickup.items():
+            if getattr(pc, "active", False):
+                keep.add(a)
         for agv_id in list(self.stream_readers.keys()):
-            if agv_id not in visible:
+            if agv_id not in keep:
                 try:
                     self.stream_readers[agv_id].stop()
                 except Exception:
@@ -1417,6 +1445,18 @@ class AGVControlApp(ctk.CTk):
     def _emergency_stop(self):
         actions = []
 
+        # 0. Kup operasyonlari + harita yerlestirme modu iptal (faceDir/kapma
+        # zinciri devam etmesin; firmware STOP'u asagida zaten gidiyor)
+        if self.cube_ops:
+            self.cube_ops.clear()
+            self._refresh_cube_panel()
+            actions.append("Kup operasyonlari iptal")
+        try:
+            if self.map_widget.placing:
+                self.map_widget.cancel_placement()
+        except Exception:
+            pass
+
         # 1. Planner mission'larini iptal et + her AGV'ye clearMission/STOP
         try:
             self._planner_clear_all()
@@ -1557,9 +1597,12 @@ class AGVControlApp(ctk.CTk):
         # Aktif AGV degisiyor: ESKI AGV'nin kapma kontroloru calisiyorsa durdur
         # — stream sadece aktif AGV icin acik kalir, eski kontrolor tespitsiz
         # kor calisip lost-abort'a duserdi; temiz durdurmak daha guvenli.
+        # ISTISNA: kup operasyonu (otonom fetch) suruyorsa DURDURMA —
+        # _sync_stream_readers o AGV'nin stream'ini artik acik tutuyor.
         if self.active_agv and self.active_agv != agv_id:
             old = self.auto_pickup.get(self.active_agv)
-            if old is not None and getattr(old, "active", False):
+            if (old is not None and getattr(old, "active", False)
+                    and self.active_agv not in self.cube_ops):
                 old.stop()
                 self._pickup_log(self.active_agv,
                                  "aktif AGV değişti — kapma durduruldu")
@@ -2413,6 +2456,419 @@ class AGVControlApp(ctk.CTk):
         ga = float(auto.get("grab_gamma_off", 0) or 0)
         lbl.configure(text=f"ileri {f:+g}  yan {la:+g} (sağ+)  grip {ga:+g}°")
 
+    # =========================================================================
+    # KÜPLER — yerleştirme (harita) + al/bırak orkestrasyonu
+    # =========================================================================
+    # Akış (kullanıcı kararı): 4 küp başta NULL; kullanıcı haritadan node +
+    # çizgisiz kenar işaretler. "Al": planner görevi → faceDir(side) →
+    # faceComplete → kamera/YOLO warmup → PickupController → GRABBED'de
+    # carrier=AGV + kol HOME (mıknatıs açık, taşıma pozu). "Bırak": faceDir →
+    # IK ön-aşağı poz → mıknatıs KAPAT → HOME → küp yeni node+side'a yazılır.
+
+    CUBE_GOTO_TIMEOUT_S   = 180.0   # planner görevi (çok hop + yield olabilir)
+    CUBE_FACE_TIMEOUT_S   = 40.0    # faceDir → faceComplete
+    CUBE_WARMUP_TIMEOUT_S = 8.0     # stream + YOLO ilk tespit
+
+    def _build_cube_panel(self, parent):
+        ctk.CTkLabel(parent, text="📦 KÜPLER", font=self.font_h2).pack(pady=(4, 0))
+        self.cube_rows_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self.cube_rows_frame.pack(fill="x", padx=12, pady=(2, 0))
+
+        act = ctk.CTkFrame(parent, fg_color="transparent")
+        act.pack(fill="x", padx=12, pady=(2, 0))
+        ctk.CTkButton(act, text="📦 Bırak", width=80, height=26,
+                      fg_color=COL_WARN, hover_color=COL_WARN_HOVER,
+                      font=self.font_small,
+                      command=self._cube_drop_begin).pack(side="left", expand=True,
+                                                          fill="x", padx=(0, 2))
+        ctk.CTkButton(act, text="✖ İptal", width=70, height=26,
+                      fg_color=COL_MUTED, font=self.font_small,
+                      command=self._cube_op_cancel).pack(side="left", expand=True,
+                                                         fill="x", padx=(2, 0))
+
+        # Manuel faceDir — öğrenilen süreli dönüşü sahada tek tuşla test etmek için
+        face = ctk.CTkFrame(parent, fg_color="transparent")
+        face.pack(fill="x", padx=12, pady=(2, 6))
+        ctk.CTkLabel(face, text="Yüz dön:", font=self.font_small,
+                     text_color=COL_MUTED).pack(side="left", padx=(0, 4))
+        for lbl, d in (("K", "N"), ("D", "E"), ("G", "S"), ("B", "W")):
+            ctk.CTkButton(face, text=lbl, width=34, height=24,
+                          fg_color=COL_INFO, hover_color=COL_INFO_HOVER,
+                          font=self.font_small,
+                          command=lambda dd=d: self._cube_face_manual(dd)
+                          ).pack(side="left", expand=True, fill="x", padx=1)
+
+        self.cube_op_lbl = ctk.CTkLabel(parent, text="", anchor="w",
+                                        font=self.font_small,
+                                        text_color=COL_SUBTLE)
+        self.cube_op_lbl.pack(fill="x", padx=12, pady=(0, 4))
+        self._refresh_cube_panel()
+
+    def _refresh_cube_panel(self):
+        """4 küp satırını yeniden kur (ucuz: 4 satır; store/op değişiminde)."""
+        if not hasattr(self, "cube_rows_frame"):
+            return
+        for w in self.cube_rows_frame.winfo_children():
+            w.destroy()
+        for cid, c in sorted(self.cube_store.cubes.items()):
+            row = ctk.CTkFrame(self.cube_rows_frame, fg_color="transparent")
+            row.pack(fill="x", pady=1)
+            if c.carried:
+                txt, col = f"K{cid} 🚚 {c.carrier}", COL_TXT_WARN
+            elif c.placed:
+                txt = f"K{cid} {c.node}·{SIDE_LABELS_TR.get(c.side or '', c.side)}"
+                col = COL_TXT_OK
+            else:
+                txt, col = f"K{cid} —", COL_SUBTLE
+            ctk.CTkLabel(row, text=txt, width=92, anchor="w",
+                         font=self.font_small, text_color=col).pack(side="left")
+            if c.placed:
+                ctk.CTkButton(row, text="🧲 Al", width=52, height=22,
+                              fg_color=COL_SUCCESS, hover_color=COL_SUCCESS_HOVER,
+                              font=self.font_small,
+                              command=lambda i=cid: self._cube_fetch(i)
+                              ).pack(side="left", padx=2)
+                ctk.CTkButton(row, text="✖", width=26, height=22,
+                              fg_color=COL_MUTED, font=self.font_small,
+                              command=lambda i=cid: self._cube_remove(i)
+                              ).pack(side="left", padx=1)
+            elif not c.carried:
+                ctk.CTkButton(row, text="📍 Yerleştir", width=84, height=22,
+                              fg_color=COL_INFO, hover_color=COL_INFO_HOVER,
+                              font=self.font_small,
+                              command=lambda i=cid: self._cube_place_begin(i)
+                              ).pack(side="left", padx=2)
+        # Aktif operasyon özeti
+        if hasattr(self, "cube_op_lbl"):
+            ops = [f"{a}: K{o['cube_id']} {o['kind']}/{o['phase']}"
+                   for a, o in self.cube_ops.items()]
+            self.cube_op_lbl.configure(text=" | ".join(ops) if ops else "")
+
+    def _cubes_redraw(self):
+        """Saha küplerini her iki haritaya bas + panel satırlarını tazele."""
+        placed = [(c.cube_id, c.node, c.side)
+                  for c in self.cube_store.placed_cubes()]
+        for w in (getattr(self, "map_widget", None),
+                  getattr(self, "dash_map", None)):
+            if w is not None:
+                w.set_cubes(placed)   # type: ignore[arg-type]
+        self._refresh_cube_panel()
+
+    def _cube_log(self, agv_id: str, msg: str):
+        self._add_log(LogEvent(agvId=agv_id or "*", message=f"[KÜP] {msg}",
+                               time_ms=0, wall_time=time.time()))
+
+    # ---------- yerleştirme (harita) ----------
+    def _cube_free_sides(self, node: str) -> List[str]:
+        """Çizgisiz VE başka küp olmayan kenarlar."""
+        return [s for s in free_sides(self.fleet_graph, node)
+                if self.cube_store.cube_at(node, s) is None]
+
+    def _cube_place_begin(self, cube_id: int):
+        def get_sides(node: str) -> List[str]:
+            sides = self._cube_free_sides(node)
+            if not sides:
+                self._set_status(f"{node}: boş çizgisiz kenar yok", err=True)
+            return sides
+        self.map_widget.begin_placement(
+            get_sides, lambda n, s: self._cube_place_done(cube_id, n, s))
+        self._set_status(f"K{cube_id}: haritada node tıkla, sonra kenar seç "
+                         f"(✖ İptal ile vazgeç)")
+
+    def _cube_place_done(self, cube_id: int, node: str, side: str):
+        self.cube_store.place(cube_id, node, side)
+        self._cube_log("*", f"K{cube_id} yerleştirildi: {node}·"
+                            f"{SIDE_LABELS_TR.get(side, side)}")
+        self._set_status(f"K{cube_id} → {node}·{SIDE_LABELS_TR.get(side, side)}")
+        self._cubes_redraw()
+
+    def _cube_remove(self, cube_id: int):
+        self.cube_store.clear(cube_id)
+        self._cube_log("*", f"K{cube_id} haritadan kaldırıldı")
+        self._cubes_redraw()
+
+    # ---------- al (fetch) ----------
+    def _cube_fetch(self, cube_id: int):
+        res = self._ensure_active()
+        if res is None:
+            return
+        client, agv = res
+        cube = self.cube_store.cubes.get(cube_id)
+        if cube is None or not cube.placed:
+            self._set_status(f"K{cube_id} sahada değil", err=True)
+            return
+        if self.cube_store.carried_by(agv) is not None:
+            self._set_status(f"{agv} zaten küp taşıyor", err=True)
+            return
+        if agv in self.cube_ops:
+            self._set_status(f"{agv}: küp operasyonu zaten sürüyor", err=True)
+            return
+        state = self.agvs.get(agv)
+        pos = self._valid_wp(state.currentWaypoint if state else None)
+        if pos is None:
+            self._set_status(f"{agv}: konum bilinmiyor (RFID okutun)", err=True)
+            return
+        if state is not None and state.navState not in ("", "IDLE"):
+            self._set_status(f"{agv} meşgul ({state.navState})", err=True)
+            return
+
+        op = {"kind": "fetch", "phase": "GOTO", "cube_id": cube_id,
+              "node": cube.node, "side": cube.side,
+              "deadline": time.time() + self.CUBE_GOTO_TIMEOUT_S}
+        self.cube_ops[agv] = op
+        self._cube_log(agv, f"K{cube_id} alınıyor: hedef {cube.node}·"
+                            f"{SIDE_LABELS_TR.get(cube.side or '', cube.side)}")
+        if pos == cube.node:
+            self._cube_send_face(agv)
+        else:
+            self._planner_assign_target(agv, cube.node)   # type: ignore[arg-type]
+            m = self.fleet_planner.missions.get(agv)
+            if m is None or m.goal != cube.node or len(m.path) <= 1:
+                self.fleet_planner.cancel_mission(agv)
+                self._cube_op_fail(agv, "görev oluşturulamadı (rota yok?)")
+                return
+        self._refresh_cube_panel()
+
+    def _cube_send_face(self, agv_id: str):
+        """GOTO bitti (veya zaten node'da) → AGV'yi küp kenarına döndür."""
+        op = self.cube_ops.get(agv_id)
+        if op is None:
+            return
+        op["phase"] = "FACE"
+        op["deadline"] = time.time() + self.CUBE_FACE_TIMEOUT_S
+        ok = self.client.face_dir(agv_id, op["side"]) if self.client else False
+        if not ok:
+            self._cube_op_fail(agv_id, "faceDir gönderilemedi (WS?)")
+            return
+        self._cube_log(agv_id, f"faceDir {op['side']} gönderildi "
+                               f"({SIDE_LABELS_TR.get(op['side'], op['side'])} "
+                               f"kenarına dönüş)")
+        self._refresh_cube_panel()
+
+    def _cube_on_face_complete(self, ev) -> None:
+        """faceComplete (AGV küp kenarına döndü) → fetch: kamera warmup;
+        drop: bırakma dizisi."""
+        agv_id = ev.agvId
+        op = self.cube_ops.get(agv_id)
+        if op is None or op["phase"] != "FACE":
+            return   # manuel faceDir testi — sadece log'da görünür
+        if ev.node and op["node"] and ev.node != op["node"]:
+            self._cube_op_fail(agv_id, f"yanlış node'da döndü ({ev.node} ≠ "
+                                       f"{op['node']})")
+            return
+        if op["kind"] == "drop":
+            self._cube_release_seq(agv_id)
+            return
+        # fetch → kamera + YOLO hazırla, ilk taze tespiti bekle
+        op["phase"] = "WARMUP"
+        op["deadline"] = time.time() + self.CUBE_WARMUP_TIMEOUT_S
+        self._ensure_arm_state(agv_id)
+        self._cam_connect(agv_id)
+        self.detect_vars[agv_id].set(True)
+        self._cube_log(agv_id, "kamera + YOLO ısınıyor (küp tespiti bekleniyor)")
+        self._refresh_cube_panel()
+
+    def _cube_ops_tick(self):
+        """UI tick'inden çağrılır: faz ilerletme + zaman aşımı denetimi."""
+        if not self.cube_ops:
+            return
+        now = time.time()
+        for agv_id, op in list(self.cube_ops.items()):
+            ph = op.get("phase")
+            if ph == "GOTO":
+                m = self.fleet_planner.missions.get(agv_id)
+                state = self.agvs.get(agv_id)
+                pos = self._valid_wp(state.currentWaypoint if state else None)
+                if (m is None or m.is_done) and pos == op["node"]:
+                    self._cube_send_face(agv_id)
+                elif m is None and pos != op["node"]:
+                    # görev kayboldu (iptal/deadlock break) ama varılamadı
+                    self._cube_op_fail(agv_id, "görev bitti ama node'a varılamadı")
+                elif now > op["deadline"]:
+                    self.fleet_planner.cancel_mission(agv_id)
+                    if self.client:
+                        self.client.clear_mission(agv_id)
+                    self._cube_op_fail(agv_id, "GOTO zaman aşımı")
+            elif ph == "FACE":
+                if now > op["deadline"]:
+                    self._cube_op_fail(agv_id, "faceComplete gelmedi (zaman aşımı)")
+            elif ph == "WARMUP":
+                det = self.detection_state.get(agv_id)
+                if det and now - float(det.get("ts", 0)) < 0.5:
+                    op["phase"] = "PICKUP"
+                    self._pickup_start(agv_id)
+                    pc = self.auto_pickup.get(agv_id)
+                    if pc is None or not pc.active:
+                        self._cube_op_fail(agv_id, "kapma başlatılamadı "
+                                                   "(kalibrasyon?)")
+                    else:
+                        self._refresh_cube_panel()
+                elif now > op["deadline"]:
+                    self._cube_op_fail(agv_id, "küp kamerada görünmedi — "
+                                               "yön/mesafe kontrol et")
+            elif ph == "PICKUP":
+                pc = self.auto_pickup.get(agv_id)
+                if pc is None:
+                    self._cube_op_fail(agv_id, "kontrolör yok")
+                elif pc.state == "GRABBED":
+                    cid = op["cube_id"]
+                    self.cube_store.pick_up(cid, agv_id)
+                    var = self.arm_magnet_vars.get(agv_id)
+                    if var is not None:
+                        var.set(True)
+                    # Taşıma pozu: kol HOME'a (mıknatıs AÇIK kalır; firmware
+                    # 3-aşamalı home + grip 'held' iken termal sayaç durur)
+                    self._arm_http_get(agv_id, "/arm/home")
+                    del self.cube_ops[agv_id]
+                    self._cube_log(agv_id, f"🎯 K{cid} AGV üzerinde — kol "
+                                           f"taşıma pozunda (HOME)")
+                    self._cubes_redraw()
+                elif pc.state in ("ABORT", "IDLE"):
+                    self._cube_op_fail(agv_id,
+                                       f"kapma bitmedi ({pc.state}): {pc.message}")
+            # RELEASE fazı after-zinciriyle ilerler (tick gerekmez)
+
+    def _cube_op_fail(self, agv_id: str, msg: str):
+        self.cube_ops.pop(agv_id, None)
+        self._cube_log(agv_id, f"✗ operasyon iptal: {msg}")
+        self._set_status(f"{agv_id} küp operasyonu: {msg}", err=True)
+        self._refresh_cube_panel()
+
+    def _cube_op_cancel(self):
+        """✖ İptal: harita yerleştirme modu + aktif AGV'nin küp operasyonu."""
+        if self.map_widget.placing:
+            self.map_widget.cancel_placement()
+            self._set_status("Yerleştirme iptal edildi")
+            return
+        agv = self.active_agv
+        if agv and agv in self.cube_ops:
+            op = self.cube_ops[agv]
+            if op["phase"] == "GOTO":
+                self.fleet_planner.cancel_mission(agv)
+                if self.client:
+                    self.client.clear_mission(agv)
+                    self.client.command(agv, "stop")
+            elif op["phase"] == "PICKUP":
+                self._pickup_stop(agv)
+            self._cube_op_fail(agv, "kullanıcı iptali")
+        else:
+            self._set_status("İptal edilecek küp operasyonu yok")
+
+    def _cube_face_manual(self, d: str):
+        """Manuel faceDir testi (öğrenilen süreli dönüş saha doğrulaması)."""
+        res = self._ensure_active()
+        if res is None:
+            return
+        client, agv = res
+        if client.face_dir(agv, d):
+            self._cube_log(agv, f"manuel faceDir {d}")
+        else:
+            self._set_status("faceDir gönderilemedi", err=True)
+
+    # ---------- bırak (drop) ----------
+    def _cube_drop_begin(self):
+        res = self._ensure_active()
+        if res is None:
+            return
+        client, agv = res
+        cube = self.cube_store.carried_by(agv)
+        if cube is None:
+            self._set_status(f"{agv} küp taşımıyor", err=True)
+            return
+        if agv in self.cube_ops:
+            self._set_status(f"{agv}: küp operasyonu zaten sürüyor", err=True)
+            return
+        state = self.agvs.get(agv)
+        node = self._valid_wp(state.currentWaypoint if state else None)
+        if node is None:
+            self._set_status(f"{agv}: konum bilinmiyor", err=True)
+            return
+        if state is not None and state.navState not in ("", "IDLE"):
+            self._set_status(f"{agv} meşgul ({state.navState})", err=True)
+            return
+        sides = self._cube_free_sides(node)
+        if not sides:
+            self._set_status(f"{node}: bırakılacak boş çizgisiz kenar yok",
+                             err=True)
+            return
+        cid = cube.cube_id
+
+        def get_sides(n: str) -> List[str]:
+            return sides if n == node else []
+
+        def on_pick(n: str, s: str):
+            op = {"kind": "drop", "phase": "FACE", "cube_id": cid,
+                  "node": n, "side": s,
+                  "deadline": time.time() + self.CUBE_FACE_TIMEOUT_S}
+            self.cube_ops[agv] = op
+            self._cube_log(agv, f"K{cid} bırakılıyor: {n}·"
+                                f"{SIDE_LABELS_TR.get(s, s)}")
+            self._cube_send_face(agv)
+
+        self.map_widget.begin_placement(get_sides, on_pick, preselect=node)
+        self._set_status(f"{agv} @ {node}: bırakılacak kenarı haritadan seç")
+
+    def _cube_release_seq(self, agv_id: str):
+        """Bırakma dizisi: IK ile ön-aşağı poza in → mıknatıs KAPAT → HOME.
+        Kinematik yoksa / poz zarf dışıysa olduğu yerde bırakır (uyarı ile)."""
+        op = self.cube_ops.get(agv_id)
+        if op is None:
+            return
+        op["phase"] = "RELEASE"
+        self._refresh_cube_panel()
+        from arm_kinematics import ArmModel
+        self.pickup_cfg = self._pickup_load_config()
+        auto = (self.pickup_cfg.get("autonomous") or {})
+        kin = auto.get("kinematics") or {}
+        model = ArmModel(kin)
+        drop_fwd = float(auto.get("drop_fwd_cm", 13.0) or 13.0)
+        cube_cm = float(kin.get("cube_cm") or 4.0)
+        tgt = None
+        if not model.missing():
+            try:
+                # tip = mıknatıs ucu; küp altında → küp tabanı yerde olsun
+                tgt = model.ik(drop_fwd, 0.0, cube_cm + 0.4)
+            except Exception:
+                tgt = None
+        if tgt is not None:
+            pc = self._pickup_get(agv_id)
+            pc._cfg = {**pc.DEFAULTS, **auto}     # zarf bantları taze olsun
+            cmd = [int(round(v)) for v in tgt]
+            if not pc._envelope_ok(cmd):
+                tgt = None
+        speed = int(auto.get("pickup_speed_ms", 40) or 40)
+        self._arm_http_get(agv_id, f"/servo/speed?ms={speed}")
+        if tgt is not None:
+            cmd = [int(round(v)) for v in tgt]
+            for i, v in enumerate(cmd):
+                self._arm_http_get(agv_id, f"/servo?id={i}&a={v}")
+            self._cube_log(agv_id, f"bırakma pozuna iniliyor {cmd} "
+                                   f"(ileri {drop_fwd:g} cm)")
+            settle_ms = 3500
+        else:
+            self._cube_log(agv_id, "⚠ kinematik yok / poz zarf dışı — küp "
+                                   "olduğu pozdan bırakılıyor")
+            settle_ms = 300
+
+        def _do_release():
+            self._arm_http_get(agv_id, "/magnet?s=0")
+            var = self.arm_magnet_vars.get(agv_id)
+            if var is not None:
+                var.set(False)
+            self.after(900, _do_home)
+
+        def _do_home():
+            self._arm_http_get(agv_id, "/arm/home")
+            op2 = self.cube_ops.pop(agv_id, None)
+            if op2 is not None:
+                self.cube_store.drop(op2["cube_id"], op2["node"], op2["side"])
+                self._cube_log(agv_id,
+                               f"📦 K{op2['cube_id']} bırakıldı: {op2['node']}·"
+                               f"{SIDE_LABELS_TR.get(op2['side'], op2['side'])}")
+            self._cubes_redraw()
+
+        self.after(settle_ms, _do_release)
+
     # ---------- Kapma kalibrasyonu (base sweep) — KALDIRILDI ----------
     # Eski manuel tarama state machine'i (_pickup_scan_*, SCAN_TYPES, scan_pose)
     # kaldirildi. Base taramasi PickupController.SCAN durumunda otomatik yapilir;
@@ -2766,6 +3222,15 @@ class AGVControlApp(ctk.CTk):
                             time_ms=0, wall_time=time.time(),
                         ))
                     self._planner_on_hop_complete(ev.agvId, ev.node)
+                elif kind == "face_complete":
+                    ev = payload   # FaceCompleteEvent
+                    self._add_log(LogEvent(
+                        agvId=ev.agvId,
+                        message=f"[KÜP] faceComplete: {ev.node or '?'} @ "
+                                f"{ev.heading or '?'}",
+                        time_ms=ev.time_ms, wall_time=time.time(),
+                    ))
+                    self._cube_on_face_complete(ev)
                 elif kind == "ws_debug":
                     # WS client debug timing event'i — log paneline yansit
                     self._add_log(LogEvent(
@@ -2814,6 +3279,8 @@ class AGVControlApp(ctk.CTk):
         # Olay gelsin gelmesin her tick: planner deadlock watchdog (FP-01).
         # WS olayi GELMEDIGI durum (herkes WAIT) tam da donma durumudur.
         self._planner_watchdog()
+        # Kup operasyonu faz ilerletme + zaman asimi (GOTO→FACE→WARMUP→PICKUP)
+        self._cube_ops_tick()
 
     def _planner_watchdog(self) -> None:
         """FP-01: aktif mission varken periyodik nabiz at; tum aktif AGV'ler

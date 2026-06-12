@@ -10,6 +10,13 @@ A-I waypoint grafini Tkinter Canvas uzerinde cizer.
 
 Multi-AGV gosterimi icin `set_fleet_state(agvs)` API mevcut.
 
+Kup katmani:
+- `set_cubes([(cube_id, node, side), ...])` — sahadaki kupleri turuncu kare
+  olarak node'un side kenarinda gosterir (her iki cizim modunda).
+- `begin_placement(get_sides_fn, on_pick)` — kup yerlestirme modu: kullanici
+  once node tiklar, sonra cizgisiz kenarlardan birini secer;
+  on_pick(node, side) cagrilir. `cancel_placement()` iptal eder.
+
 Grid (10 kenar — 2026-05 cyclic guncellemesi):
     A───B───C
         │   │
@@ -19,7 +26,7 @@ Grid (10 kenar — 2026-05 cyclic guncellemesi):
 """
 
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import customtkinter as ctk
 import tkinter as tk
 
@@ -48,6 +55,13 @@ _EDGES: List[Tuple[str, str]] = [
     ("F", "I"),
     ("G", "H"), ("H", "I"),
 ]
+
+# Yon harfleri → kanvas birim vektoru (y asagi = guney; firmware konvansiyonu)
+_SIDE_VEC: Dict[str, Tuple[int, int]] = {
+    "N": (0, -1), "E": (1, 0), "S": (0, 1), "W": (-1, 0),
+}
+_SIDE_TR = {"N": "K", "E": "D", "S": "G", "W": "B"}   # kisa Turkce etiket
+_CUBE_COLOR = "#ff9f1a"
 
 
 # Multi-AGV gosterimi icin per-AGV durum nesnesi
@@ -87,6 +101,14 @@ class WaypointCanvas(ctk.CTkFrame):
         self.heading:    str = ""
         # Multi-AGV API (planner viewer)
         self.fleet:      List[FleetAGVDisplay] = []
+        # Kup katmani: [(cube_id, node, side), ...]
+        self.cubes:      List[Tuple[int, str, str]] = []
+        # Yerlestirme modu state'i
+        self._place_get_sides: Optional[Callable[[str], List[str]]] = None
+        self._place_on_pick:   Optional[Callable[[str, str], None]] = None
+        self._place_node:      Optional[str] = None
+        self._place_sides:     List[str] = []
+        self._place_marker_px: Dict[str, Tuple[float, float]] = {}
 
     # -------------------------------------------------------------------------
     # Public API
@@ -105,10 +127,64 @@ class WaypointCanvas(ctk.CTkFrame):
         self.heading    = ""
         self._redraw()
 
+    def set_cubes(self, cubes: List[Tuple[int, str, str]]):
+        """Sahadaki kupler: [(cube_id, node, side), ...]. Tasinanlar dahil
+        edilmez (cagiran filtreler)."""
+        self.cubes = list(cubes)
+        self._redraw()
+
+    def begin_placement(self,
+                        get_sides: Callable[[str], List[str]],
+                        on_pick:   Callable[[str, str], None],
+                        preselect: Optional[str] = None):
+        """Kup yerlestirme modu: kullanici node tiklar → get_sides(node)'un
+        dondurdugu kenarlardan birini secer → on_pick(node, side).
+        preselect: node secimini atla (or. birakma — AGV'nin node'u sabit)."""
+        self._place_get_sides = get_sides
+        self._place_on_pick   = on_pick
+        self._place_node      = None
+        self._place_sides     = []
+        if preselect is not None and preselect in _WAYPOINTS:
+            sides = get_sides(preselect)
+            if sides:
+                self._place_node  = preselect
+                self._place_sides = sides
+        self._redraw()
+
+    def cancel_placement(self):
+        self._place_get_sides = None
+        self._place_on_pick   = None
+        self._place_node      = None
+        self._place_sides     = []
+        self._place_marker_px = {}
+        self._redraw()
+
+    @property
+    def placing(self) -> bool:
+        return self._place_on_pick is not None
+
     # -------------------------------------------------------------------------
     # Tiklama
     # -------------------------------------------------------------------------
     def _on_click(self, event):
+        # Yerlestirme modu oncelikli: once kenar isaretcisi, sonra node secimi
+        if self.placing:
+            if self._place_node:
+                for side, (mx, my) in self._place_marker_px.items():
+                    if (event.x - mx) ** 2 + (event.y - my) ** 2 <= 14 ** 2:
+                        node, cb = self._place_node, self._place_on_pick
+                        self.cancel_placement()
+                        if cb:
+                            cb(node, side)
+                        return
+            wp = self._wp_at(event.x, event.y)
+            if wp and self._place_get_sides:
+                sides = self._place_get_sides(wp)
+                if sides:
+                    self._place_node  = wp
+                    self._place_sides = sides
+                self._redraw()
+            return
         if self.on_target_click is None:
             return
         wp = self._wp_at(event.x, event.y)
@@ -185,6 +261,9 @@ class WaypointCanvas(ctk.CTkFrame):
             L = self.NODE_R + 16
             c.create_line(cx, cy, cx + dx * L, cy + dy * L,
                           fill="#3fbf66", width=3, arrow=tk.LAST)
+
+        self._draw_cubes(c, w, h)
+        self._draw_placement(c, w, h)
 
         c.create_text(w - 8, h - 30, anchor="se", fill="#aaa", font=("Helvetica", 9),
                       text="● Konum   ◯ Hedef   ─ Yol")
@@ -280,6 +359,63 @@ class WaypointCanvas(ctk.CTkFrame):
                 c.create_line(cx, cy, cx + dx * L, cy + dy * L,
                               fill=agv.color, width=3, arrow=tk.LAST)
 
+        self._draw_cubes(c, w, h)
+        self._draw_placement(c, w, h)
+
         # Lejand
         c.create_text(8, h - 12, anchor="sw", fill="#888", font=("Helvetica", 9),
-                      text=f"{len(self.fleet)} AGV  |  ● konum  ◯ hedef")
+                      text=f"{len(self.fleet)} AGV  |  ● konum  ◯ hedef"
+                           + ("  |  ■ kup" if self.cubes else ""))
+
+    # -------------------------------------------------------------------------
+    # Kup katmani + yerlestirme overlay'i (her iki cizim modunda ortak)
+    # -------------------------------------------------------------------------
+    def _draw_cubes(self, c, w, h):
+        """Sahadaki kupleri node'un side kenarinda turuncu kare olarak ciz."""
+        r = self.NODE_R
+        for cube_id, node, side in self.cubes:
+            if node not in _WAYPOINTS or side not in _SIDE_VEC:
+                continue
+            nx, ny = _WAYPOINTS[node]
+            dx, dy = _SIDE_VEC[side]
+            cx = nx * w + dx * (r + 14)
+            cy = ny * h + dy * (r + 14)
+            s = 8
+            c.create_rectangle(cx - s, cy - s, cx + s, cy + s,
+                               fill=_CUBE_COLOR, outline="#ffffff", width=1,
+                               tags="cube")
+            c.create_text(cx, cy, text=str(cube_id), fill="#1a1a1a",
+                          font=("Helvetica", 9, "bold"))
+
+    def _draw_placement(self, c, w, h):
+        """Yerlestirme modunda secili node'u vurgula + secilebilir kenar
+        isaretcilerini ciz. Isaretci merkezleri _place_marker_px'e yazilir
+        (_on_click hit testi icin)."""
+        self._place_marker_px = {}
+        if not self.placing:
+            return
+        r = self.NODE_R
+        if self._place_node is None:
+            c.create_text(w / 2, 14, fill=_CUBE_COLOR,
+                          font=("Helvetica", 11, "bold"),
+                          text="KUP YERLESTIRME: bir node tikla")
+            return
+        nx, ny = _WAYPOINTS[self._place_node]
+        cx, cy = nx * w, ny * h
+        c.create_oval(cx - r - 6, cy - r - 6, cx + r + 6, cy + r + 6,
+                      outline=_CUBE_COLOR, width=3, tags="place_sel")
+        c.create_text(w / 2, 14, fill=_CUBE_COLOR,
+                      font=("Helvetica", 11, "bold"),
+                      text=f"{self._place_node}: kenar sec "
+                           f"({'/'.join(_SIDE_TR[s] for s in self._place_sides)})")
+        for side in self._place_sides:
+            dx, dy = _SIDE_VEC.get(side, (0, 0))
+            mx = cx + dx * (r + 22)
+            my = cy + dy * (r + 22)
+            self._place_marker_px[side] = (mx, my)
+            s = 11
+            c.create_rectangle(mx - s, my - s, mx + s, my + s,
+                               fill="#3a3a3a", outline=_CUBE_COLOR, width=2,
+                               tags="place_side")
+            c.create_text(mx, my, text=_SIDE_TR[side], fill=_CUBE_COLOR,
+                          font=("Helvetica", 10, "bold"))

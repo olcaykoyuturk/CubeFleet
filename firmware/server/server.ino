@@ -412,6 +412,26 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
                       doc["agvId"].as<String>().c_str(),
                       doc["node"].as<String>().c_str());
     }
+    else if (type == "faceDir") {
+        // PC'den kup yonune donus emri: hedef AGV'ye aynen yonlendir.
+        // payload: {type:"faceDir", agvId, dir:"N"|"E"|"S"|"W"}
+        String agvId = doc["agvId"].as<String>();
+        int idx = findAGVById(agvId);
+        if (idx >= 0 && agvs[idx].connected) {
+            ws.text(agvs[idx].clientId, message);
+            Serial.printf("faceDir %s: %s\n", agvId.c_str(),
+                          doc["dir"].as<String>().c_str());
+        }
+    }
+    else if (type == "faceComplete") {
+        // AGV kup yonune donusu bitirdi. hopComplete pattern'i: broadcast.
+        // payload: {type:"faceComplete", agvId, node, heading?}
+        ws.textAll(message);
+        Serial.printf("[FACE] %s @ %s -> %s\n",
+                      doc["agvId"].as<String>().c_str(),
+                      doc["node"].as<String>().c_str(),
+                      doc["heading"].as<String>().c_str());
+    }
     else if (type == "getList") {
         // Dashboard AGV listesi istiyor
         broadcastAGVList();

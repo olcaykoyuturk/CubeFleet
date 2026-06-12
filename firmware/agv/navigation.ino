@@ -163,6 +163,17 @@ static void centerOnLine() {
 // Tek dönüş motoru (90° / 180° hepsi)
 // =============================================================================
 
+// ÖĞRENİLEN 90° DÖNÜŞ SÜRESİ — her başarılı SENSÖRLÜ 90° segment ölçülür,
+// EMA (%70 eski + %30 yeni) ile güncellenir. faceDir bunun üzerinden çizgisiz
+// (küp yönü) dönüş yapar. Default yalnız ilk sensörlü dönüşe kadar geçerli.
+static unsigned long avgTurn90Ms = TIMED_TURN90_DEFAULT_MS;
+
+static void updateTurn90Avg(unsigned long measuredMs) {
+    if (measuredMs < TIMED_TURN90_MIN_MS || measuredMs > TIMED_TURN90_MAX_MS)
+        return;   // sahte/takılmalı ölçüm — ortalamayı kirletme
+    avgTurn90Ms = (avgTurn90Ms * 7 + measuredMs * 3) / 10;
+}
+
 // Spin turn: exitLine + findLine adımları toplam 'segments' kez tekrar.
 // 90° → 1 segment, 180° (varsa ara çizgi) → 2 segment.
 // headingDelta: heading update miktarı (-1 = sol 90°, +1 = sağ 90°, +2 = 180°)
@@ -171,6 +182,7 @@ static bool executeSpinTurn(bool turnRight, int segments, int headingDelta,
     motorStop(); webSocketLoop(); delay(50);
 
     for (int s = 0; s < segments; s++) {
+        unsigned long segStart = millis();
         if (!sensorExitLine(turnRight)) {
             motorStop();
             char buf[40]; snprintf(buf, sizeof(buf), "%s: Cikis-%d TIMEOUT", tag, s + 1);
@@ -183,11 +195,32 @@ static bool executeSpinTurn(bool turnRight, int segments, int headingDelta,
             sendLog(buf);
             return false;
         }
+        // Başarılı 90° segment — süresini öğrenilen ortalamaya işle
+        updateTurn90Avg(millis() - segStart);
     }
 
     centerOnLine();
     motorStop(); webSocketLoop(); delay(50);
     heading = (Heading)((heading + headingDelta + 4) % 4);
+    return true;
+}
+
+// ZAMANLI 90° dönüş — çizgi OLMAYAN yöne (küp tarafı). Öğrenilen ortalama
+// süre kadar döner, sonra durur. STOP her an işler (navCommandStop
+// navState'i IDLE yapar → döngü kırılır). Dönüşte biriken küçük açı hatası
+// kalıcı DEĞİL: bir sonraki sensörlü dönüş (setHop ilk dönüşü) çizgiye
+// kilitlenirken hatayı sıfırlar.
+static bool timedTurn90(bool turnRight) {
+    motorStop(); webSocketLoop(); delay(50);
+    unsigned long start = millis();
+    while (millis() - start < avgTurn90Ms) {
+        webSocketLoop();
+        if (navState == NAV_IDLE) { motorStop(); return false; }   // STOP
+        turnRight ? motorTurnRight(TURN_SPEED) : motorTurnLeft(TURN_SPEED);
+        delay(2);
+    }
+    motorStop();
+    heading = (Heading)((heading + (turnRight ? 1 : 3)) % 4);
     return true;
 }
 
@@ -210,6 +243,73 @@ static void executeTurn(Heading targetDir, char wp = 0) {
         case 2: turn180(wp);     break;
         case 3: turnLeft90();    break;
     }
+}
+
+// =============================================================================
+// faceDir — küp yönüne dönüş (NAV_IDLE'da, PC komutuyla)
+// =============================================================================
+
+// Bekleyen faceDir istegi (-1 = yok). webSocket handler navCommandFaceDir ile
+// yazar; handleIdle bir sonraki loop'ta yurutur (facade deseni).
+static int facePendingDir = -1;
+
+// Hedef yone don: her 90° segment icin o yonde CIZGI varsa sensorlu donus
+// (hassas + ortalamayi besler), yoksa ZAMANLI donus (ogrenilen sure).
+// 180° = iki segment (saat yonu). Bitince faceComplete PC'ye gider.
+// navState yurutme boyunca NAV_TURNING yapilir ki navCommandStop (IDLE set
+// eder) donusu her an kesebilsin; sonunda IDLE'a doner.
+static void executeFaceDir(Heading target) {
+    if (target == heading) {
+        sendFaceComplete(currentWaypoint, headingToStr(heading));
+        return;
+    }
+    navState = NAV_TURNING;
+    int diff = (target - heading + 4) % 4;     // 1=sag, 2=arka, 3=sol
+    bool turnRight = (diff != 3);
+    int  segments  = (diff == 2) ? 2 : 1;
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "faceDir: %s -> %s (%d seg, avg90=%lums)",
+             headingToStr(heading), headingToStr(target),
+             segments, avgTurn90Ms);
+    sendLog(buf);
+
+    for (int s = 0; s < segments; s++) {
+        Heading segTarget = (Heading)((heading + (turnRight ? 1 : 3)) % 4);
+        bool lineThere = (currentWaypoint != 0)
+                         && hasNeighborAt(currentWaypoint, segTarget);
+        bool ok = lineThere
+                  ? executeSpinTurn(turnRight, 1, turnRight ? 1 : -1, "FACE")
+                  : timedTurn90(turnRight);
+        if (!ok || navState == NAV_IDLE) {
+            motorStop();
+            navState = NAV_IDLE;
+            sendLog("faceDir iptal/timeout");
+            return;
+        }
+    }
+    navState = NAV_IDLE;
+    sendFaceComplete(currentWaypoint, headingToStr(heading));
+}
+
+// Komut arayuzu: 'N'/'E'/'S'/'W' karakteriyle cagrilir (websocket.ino).
+// Yalniz NAV_IDLE'da kabul — gorev ortasinda kup donusu anlamsiz/tehlikeli.
+void navCommandFaceDir(char dirChar) {
+    int d = -1;
+    switch (dirChar) {
+        case 'N': d = NORTH; break;
+        case 'E': d = EAST;  break;
+        case 'S': d = SOUTH; break;
+        case 'W': d = WEST;  break;
+    }
+    if (d < 0) { sendLog("faceDir: gecersiz yon"); return; }
+    // NAV_REACHED da kabul: hopComplete ile faceDir arasinda firmware henuz
+    // handleReached'i islememis olabilir (setHop race-guard ile ayni mantik).
+    if (navState != NAV_IDLE && navState != NAV_REACHED) {
+        sendLog("faceDir reddedildi: arac mesgul");
+        return;
+    }
+    facePendingDir = d;
 }
 
 // =============================================================================
@@ -452,6 +552,15 @@ static void handleReached() {
 
 static void handleIdle() {
     motorStop();
+
+    // Bekleyen faceDir istegi varsa yurut (kup yonune donus — bloklayan ama
+    // STOP-kesilebilir; bitince/iptal edilince IDLE'a doner).
+    if (facePendingDir >= 0) {
+        Heading t = (Heading)facePendingDir;
+        facePendingDir = -1;
+        executeFaceDir(t);
+        return;
+    }
 
     // IDLE'da SÜREKLI RFID polling (her 200 ms). AGV bir karta yerleştirilirse
     // konum hemen güncellenir — kullanıcı manuel setPosition yapmasına gerek yok.
