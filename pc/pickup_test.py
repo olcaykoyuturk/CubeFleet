@@ -780,7 +780,10 @@ class CalibWizard(ctk.CTkToplevel):
         self.h_entry: ctk.CTkEntry | None = None
         self.cx_entry: ctk.CTkEntry | None = None
         self.cy_entry: ctk.CTkEntry | None = None
-        self.cam_samples: list = []
+        # kamera ornekleri config'te KALICI -> sihirbazi tekrar acinca durur,
+        # uzerine eklenip yeniden cozulebilir
+        self.cam_samples: list = [list(s) for s in
+                                  (self._kin().get("cam_samples") or [])]
         self.cam_rms = None
 
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -1095,8 +1098,9 @@ class CalibWizard(ctk.CTkToplevel):
                    "sol −) ölç, yaz, ➕ bas. ③ En az 4-5 örnek; ÖNEMLİ: küpleri "
                    "hem farklı MESAFELERE hem SAĞA-SOLA yay (hepsi tek çizgide "
                    "OLMASIN — yoksa odak çözülemez). ④ 🧮 Çöz.", "#8af")
-        self._para("Örn: (0,12) (4,15) (-4,13) (2,18) (-3,11) gibi karışık.",
-                   "#9c9", 11)
+        self._para("Örn: (0,12) (4,15) (-4,13) (2,18) (-3,11) gibi karışık. "
+                   "Örnekler KAYDEDİLİR — sihirbazı kapatıp sonra açıp üstüne "
+                   "ekleyebilirsin.", "#9c9", 11)
         row = ctk.CTkFrame(self.body, fg_color="transparent")
         row.pack(fill="x", pady=4)
         ctk.CTkLabel(row, text="x(yan)", width=44).pack(side="left")
@@ -1142,15 +1146,19 @@ class CalibWizard(ctk.CTkToplevel):
             y = float((self.cy_entry.get() if self.cy_entry else "").replace(",", "."))
         except Exception:
             return False, "x/y sayı değil (cm)"
-        if not hasattr(self, "cam_samples"):
-            self.cam_samples = []
         servos = self._servos()
-        self.cam_samples.append((servos, float(d["cx"]), float(d["cy"]), x, y))
+        self.cam_samples.append([servos, float(d["cx"]), float(d["cy"]), x, y])
+        self._save_cam_samples()
         return True, f"örnek {len(self.cam_samples)}: ({x:g}, {y:g}) cm eklendi"
+
+    def _save_cam_samples(self):
+        """Ornekleri config'e yaz (kalici) — sihirbaz kapanip acilinca durur."""
+        self._kin()["cam_samples"] = [list(s) for s in self.cam_samples]
 
     def _clr_cam(self):
         self.cam_samples = []
         self.cam_rms = None
+        self._save_cam_samples()
         return True, "kamera örnekleri silindi"
 
     def _solve_cam(self):
