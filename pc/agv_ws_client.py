@@ -211,9 +211,11 @@ class AGVClient:
             if self._stop_flag.is_set():
                 break
 
-            # Yeniden baglan dene
+            # Yeniden baglan dene — stop sinyalini dinleyerek bekle (sleep
+            # yerine wait: kapanista 2 sn'ye kadar takilma olmasin)
             self.events.put(("error", "Yeniden baglaniliyor..."))
-            time.sleep(2.0)
+            if self._stop_flag.wait(2.0):
+                break
 
     # -------------------------------------------------------------------------
     # WS callback'leri (WS thread'inde calisir)
@@ -399,9 +401,6 @@ class AGVClient:
 
     def clear_mission(self, agv_id: str) -> bool:
         return self.send_raw({"type": "clearMission", "agvId": agv_id})
-
-    def request_list(self) -> bool:
-        return self.send_raw({"type": "getList"})
 
     # -------------------------------------------------------------------------
     # UI tarafindan polling

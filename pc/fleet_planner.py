@@ -165,9 +165,6 @@ class ReservationTable:
     def blocked_nodes_for(self, agv: str) -> Set[str]:
         return {n for n, o in self.node_owner.items() if o != agv}
 
-    def blocked_edges_for(self, agv: str) -> Set[Tuple[str, str]]:
-        return {e for e, o in self.edge_owner.items() if o != agv}
-
 
 class FleetPlanner:
     # Anti-starvation: bir AGV bu kadar tick ardisik WAIT alirsa onceligi

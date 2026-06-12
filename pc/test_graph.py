@@ -29,7 +29,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 # Eger modul olarak değil dogrudan calistirildiysa pc/ icini sys.path'e ekle
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from graph import Graph, edge_key
+from graph import Graph
 
 
 def load() -> Graph:
@@ -68,20 +68,6 @@ def expect_no_path(label, actual):
     else:
         _failed += 1
         msg = f"  ✗ {label}: expected None, got {actual}"
-        _failures.append(msg)
-        print(msg)
-
-
-def expect_any_of(label, actual, expected_paths, g: Graph):
-    """Birden cok eşit-maliyetli path olabilir; herhangi biri kabul."""
-    global _passed, _failed
-    if actual in expected_paths:
-        cost = g.path_cost(actual)
-        _passed += 1
-        print(f"  ✓ {label}: {' → '.join(actual)} ({cost:.0f} cm)")
-    else:
-        _failed += 1
-        msg = f"  ✗ {label}: got {actual}, expected one of {expected_paths}"
         _failures.append(msg)
         print(msg)
 

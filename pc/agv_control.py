@@ -75,41 +75,8 @@ PAD_LG = 12
 PAD_XL = 16
 
 
-def fmt_ago(t_ms: int) -> str:
-    """Server'dan gelen millis()'i 'X sn once' gibi gosterir (basit)."""
-    if not t_ms:
-        return ""
-    return time.strftime("%H:%M:%S", time.localtime())
-
-
-class LabelSlider(ctk.CTkFrame):
-    """Etiket + slider + canlı değer (HSV kalibrasyon için)."""
-
-    def __init__(self, master, label, mn, mx, init, on_change=None, step=1):
-        super().__init__(master, fg_color="transparent")
-        self.on_change = on_change
-        self.label = ctk.CTkLabel(self, text=label, width=70, anchor="w")
-        self.label.grid(row=0, column=0, sticky="w", padx=(0, 4))
-        steps = max(1, int((mx - mn) / step))
-        self.slider = ctk.CTkSlider(self, from_=mn, to=mx, number_of_steps=steps,
-                                    command=self._cb, width=200)
-        self.slider.set(init)
-        self.slider.grid(row=0, column=1, padx=4)
-        self.value_lbl = ctk.CTkLabel(self, text=str(init), width=40, anchor="e")
-        self.value_lbl.grid(row=0, column=2, sticky="e")
-
-    def _cb(self, val):
-        v = int(val)
-        self.value_lbl.configure(text=str(v))
-        if self.on_change is not None:
-            self.on_change(v)
-
-    def get(self) -> int:
-        return int(self.slider.get())
-
-    def set(self, v):
-        self.slider.set(v)
-        self.value_lbl.configure(text=str(int(v)))
+# (olu kod temizligi: fmt_ago + LabelSlider kaldirildi — HSV kalibrasyon
+# arayuzuyle birlikte islevsiz kalmislardi, hicbir cagrisi yoktu)
 
 
 class SensorBar(ctk.CTkFrame):
@@ -835,23 +802,37 @@ class AGVControlApp(ctk.CTk):
         return url
 
     def _arm_http_get(self, agv_id: str, path: str):
-        """HTTP GET'i ayri thread'de gonder — UI bloklanmasin."""
-        import threading
-        import urllib.request
-
+        """HTTP GET'i per-AGV SIRALI kuyrukla gonder — UI bloklanmaz VE komut
+        SIRASI korunur. Eski duzen her komutu ayri thread'le yolluyordu: art
+        arda iki /servo komutu YER DEGISTIREBILIYORDU (pickup_test'te ayni bug
+        sahada yakalandi: a=97 once varip a=95 onu eziyordu). Tek worker/AGV
+        sirayi garanti eder; AGV'ler arasi paralellik korunur."""
         base = self._arm_base_url(agv_id)
         if base is None:
             return
-        url = f"{base}{path}"
+        if not hasattr(self, "_arm_http_qs"):
+            import queue as _q
+            self._arm_http_qs: Dict[str, "_q.Queue"] = {}
+        q = self._arm_http_qs.get(agv_id)
+        if q is None:
+            import queue as _q
+            import threading
+            q = _q.Queue()
+            self._arm_http_qs[agv_id] = q
+            threading.Thread(target=self._arm_http_worker,
+                             args=(agv_id, q), daemon=True).start()
+        q.put(f"{base}{path}")
 
-        def worker():
+    def _arm_http_worker(self, agv_id: str, q):
+        """Per-AGV HTTP worker — kuyruktan SIRAYLA gonderir (daemon)."""
+        import urllib.request
+        while True:
+            url = q.get()
             try:
                 with urllib.request.urlopen(url, timeout=2.0) as r:
                     r.read()
             except Exception as ex:
-                # 'ex' except blogu bitince Python tarafindan SILINIR → lambda sonradan
-                # calistiginda NameError verir. Bu yuzden mesaji STRING olarak bagla.
-                # Ayrica kamera surekli erisilemezse status'u saniyede 1'den cok
+                # Kamera surekli erisilemezse status'u saniyede 1'den cok
                 # guncellemeyelim (hata seli onleme).
                 msg = str(ex)
                 now = time.time()
@@ -859,8 +840,6 @@ class AGVControlApp(ctk.CTk):
                     self._arm_http_err_t = now
                     self.after(0, lambda a=agv_id, m=msg: self._set_status(
                         f"{a} kol HTTP hata: {m}", err=True))
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _arm_slider_change(self, agv_id: str, servo_id: int, angle: int):
         # Label güncelle
@@ -1083,16 +1062,16 @@ class AGVControlApp(ctk.CTk):
         self.dash_agv_widgets: Dict[str, dict]              = {}
 
     def _refresh_dashboard_log(self):
-        """Dashboard'un mini log kutusu — son ~50 satır."""
+        """Dashboard mini log TAM yeniden cizim — yalniz temizlik/ilk kurulum.
+        Olagan akista _add_log append-only yazar (her olayda re-render YOK)."""
         if not hasattr(self, "dash_log_box"):
             return
         self.dash_log_box.configure(state="normal")
         self.dash_log_box.delete("1.0", "end")
-        for ev in self._log_lines[-50:]:
-            t = ev.wall_time if ev.wall_time > 0 else time.time()
-            ts = time.strftime("%H:%M:%S", time.localtime(t))
-            self.dash_log_box.insert("end",
-                f"[{ts}] [{ev.agvId or '-'}] {ev.message}\n")
+        tail = self._log_lines[-50:]
+        for ev in tail:
+            self.dash_log_box.insert("end", self._fmt_log_line(ev))
+        self._dash_vis_count = len(tail)
         self.dash_log_box.see("end")
         self.dash_log_box.configure(state="disabled")
 
@@ -1503,48 +1482,55 @@ class AGVControlApp(ctk.CTk):
     # =========================================================================
     def _refresh_agv_list(self):
         prev_active = self.active_agv   # Auto-select değişimini yakalamak için
+        ids = sorted(self.agvs.keys())
 
-        # Mevcut butonlari sil
-        for w in self.agv_list_inner.winfo_children():
-            w.destroy()
-        self.agv_buttons.clear()
+        # OPTIMIZASYON: butonlar yalniz AGV KUMESI degisince yeniden kurulur.
+        # Eski kod her agvUpdate'te (2 Hz x N AGV) destroy+recreate yapiyordu —
+        # flicker + bosa CPU. Kume ayniyken asagida sadece configure edilir.
+        if set(self.agv_buttons.keys()) != set(ids):
+            for w in self.agv_list_inner.winfo_children():
+                w.destroy()
+            self.agv_buttons.clear()
+            if not ids:
+                ctk.CTkLabel(self.agv_list_inner, text="(bos)",
+                             text_color=COL_SUBTLE).pack(pady=8)
+            for agv_id in ids:
+                btn = ctk.CTkButton(
+                    self.agv_list_inner, text=agv_id, anchor="w", height=64,
+                    command=lambda a=agv_id: self._select_agv(a),
+                )
+                btn.pack(fill="x", padx=2, pady=3)
+                self.agv_buttons[agv_id] = btn
+            # Log + sensör filtreleri de yalniz kume degisince guncellensin
+            opts = ["Hepsi"] + ids
+            self.log_filter.configure(values=opts)
+            self.sensor_filter.configure(values=opts)
 
-        if not self.agvs:
-            ctk.CTkLabel(self.agv_list_inner, text="(bos)", text_color=COL_SUBTLE).pack(pady=8)
+        if not ids:
             self.active_agv = None
             if prev_active is not None:
                 self._update_preset_panel()
             return
 
-        for agv_id, s in sorted(self.agvs.items()):
-            label = (f"{agv_id}\n"
-                     f"{s.currentWaypoint or '?'} → {s.targetWaypoint or '?'}\n"
-                     f"{s.navState or 'IDLE'}")
-            color = "#1f6aa5" if s.connected else "#444"
-            sel_color = "#3a8acf" if (agv_id == self.active_agv) else None
-
-            btn = ctk.CTkButton(
-                self.agv_list_inner, text=label, anchor="w", height=64,
-                fg_color=(sel_color or color),
-                command=lambda a=agv_id: self._select_agv(a),
-            )
-            btn.pack(fill="x", padx=2, pady=3)
-            self.agv_buttons[agv_id] = btn
-
         # Aktif AGV gecerli mi?
         if self.active_agv not in self.agvs:
             self.active_agv = None
-        if self.active_agv is None and self.agvs:
+        if self.active_agv is None:
             # Ilk bagli olani sec
-            for agv_id, s in self.agvs.items():
-                if s.connected:
+            for agv_id in ids:
+                if self.agvs[agv_id].connected:
                     self.active_agv = agv_id
                     break
 
-        # Log + sensör filtreleri guncelle
-        opts = ["Hepsi"] + sorted(self.agvs.keys())
-        self.log_filter.configure(values=opts)
-        self.sensor_filter.configure(values=opts)
+        # In-place metin + renk guncelle (rebuild YOK)
+        for agv_id in ids:
+            s = self.agvs[agv_id]
+            label = (f"{agv_id}\n"
+                     f"{s.currentWaypoint or '?'} → {s.targetWaypoint or '?'}\n"
+                     f"{s.navState or 'IDLE'}")
+            color = ("#3a8acf" if agv_id == self.active_agv
+                     else "#1f6aa5" if s.connected else "#444")
+            self.agv_buttons[agv_id].configure(text=label, fg_color=color)
 
         # Auto-select active_agv'yi değiştirdiyse preset paneli + arm paneli + top bar'ı yenile
         if self.active_agv != prev_active:
@@ -2475,10 +2461,19 @@ class AGVControlApp(ctk.CTk):
                 # Tespit kapaliysa eski state bayatlamasin (kontrolor yanlis okumasin)
                 self.detection_state.pop(agv_id, None)
 
-            # Video label varsa frame'i göster (dual'da küçük, single'da büyük)
+            # Video label varsa VE Arm sekmesi gorunuyorsa frame'i goster.
+            # OPTIMIZASYON: baska sekme aciksa BGR→RGB + PIL + CTkImage donusumu
+            # bosa is (label gorunmez) — YOLO/tespit yukarida zaten calisti
+            # (kontrolor sekmeden bagimsiz tespit verisine muhtac), yalniz
+            # gorsellestirme atlanir.
             vlbl = self.cam_video_lbls.get(agv_id)
             if vlbl is None:
                 continue
+            try:
+                if self.tabs.get() != "Arm":
+                    continue
+            except Exception:
+                pass
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil = Image.fromarray(rgb)
             # Hedef boyut: dual=320×240, single=640×480 (vlbl genişliğinden tahmin)
@@ -2582,31 +2577,62 @@ class AGVControlApp(ctk.CTk):
     # =========================================================================
     # Log
     # =========================================================================
+    @staticmethod
+    def _fmt_log_line(ev: LogEvent) -> str:
+        t = ev.wall_time if ev.wall_time > 0 else time.time()
+        ts = time.strftime("%H:%M:%S", time.localtime(t))
+        return f"[{ts}] [{ev.agvId or '-'}] {ev.message}\n"
+
     def _add_log(self, ev: LogEvent):
+        """APPEND-ONLY log yazimi. Eski kod her olayda HER IKI textbox'i bastan
+        yaziyordu (500 satir sil + yeniden insert, saniyede onlarca kez) — artik
+        yalniz yeni satir eklenir, tasan satir ustten silinir. Tam yeniden cizim
+        sadece filtre degisiminde/temizlikte (_refresh_log)."""
         self._log_lines.append(ev)
         if len(self._log_lines) > self.MAX_LOG_LINES:
             self._log_lines = self._log_lines[-self.MAX_LOG_LINES:]
-        self._refresh_log()
-        self._refresh_dashboard_log()
-        # Global mini log kaldırıldı — Dashboard tab'ında dash_log_box var.
+        line = self._fmt_log_line(ev)
+        # Log sekmesi (filtreye uyuyorsa)
+        flt = self.log_filter_var.get()
+        if flt == "Hepsi" or ev.agvId == flt:
+            self.log_text.configure(state="normal")
+            self.log_text.insert("end", line)
+            self._log_vis_count = getattr(self, "_log_vis_count", 0) + 1
+            while self._log_vis_count > self.MAX_LOG_LINES:
+                self.log_text.delete("1.0", "2.0")
+                self._log_vis_count -= 1
+            self.log_text.see("end")
+            self.log_text.configure(state="disabled")
+        # Dashboard mini log (son ~50)
+        if hasattr(self, "dash_log_box"):
+            self.dash_log_box.configure(state="normal")
+            self.dash_log_box.insert("end", line)
+            self._dash_vis_count = getattr(self, "_dash_vis_count", 0) + 1
+            while self._dash_vis_count > 50:
+                self.dash_log_box.delete("1.0", "2.0")
+                self._dash_vis_count -= 1
+            self.dash_log_box.see("end")
+            self.dash_log_box.configure(state="disabled")
 
     def _refresh_log(self):
+        """Log sekmesi TAM yeniden cizim — yalniz filtre degisimi / temizlik."""
         flt = self.log_filter_var.get()
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
+        n = 0
         for ev in self._log_lines:
             if flt != "Hepsi" and ev.agvId != flt:
                 continue
-            t = ev.wall_time if ev.wall_time > 0 else time.time()
-            ts = time.strftime("%H:%M:%S", time.localtime(t))
-            line = f"[{ts}] [{ev.agvId or '-'}] {ev.message}\n"
-            self.log_text.insert("end", line)
+            self.log_text.insert("end", self._fmt_log_line(ev))
+            n += 1
+        self._log_vis_count = n
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
     def _clear_log(self):
         self._log_lines.clear()
         self._refresh_log()
+        self._refresh_dashboard_log()
 
     # =========================================================================
     # Tick

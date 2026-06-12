@@ -30,8 +30,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Dict
 
 
 # AGV_N icin varsayilan IP eki — N=1 → 50, N=2 → 51, ... CAM_IP_OCT_4 ile uyumlu

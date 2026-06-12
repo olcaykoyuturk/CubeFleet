@@ -781,14 +781,6 @@ class PickupTest(ctk.CTk):
                 angle = round((-90.0 if kind == "grd" else 0.0) - beta, 2)
         self._add_ref_point(key, val, angle, desc)
 
-    def _clear_refs(self):
-        kin = (self.pickup_cfg.setdefault("autonomous", {})
-               .setdefault("kinematics", {}))
-        for k in ("sh_pts", "el_pts", "gr_pts", "base_pts"):
-            kin[k] = []
-        self._refresh_kin_status()
-        self.log("🗑 tüm açı referansları silindi (💾 ile kalıcı olur)")
-
     HEIGHT_HELP = {"sh": ("sh_pts", "DİRSEK mafsalı"),
                    "el": ("el_pts", "BİLEK mafsalı"),
                    "gr": ("gr_pts", "MIKNATIS UCU")}
@@ -807,22 +799,8 @@ class PickupTest(ctk.CTk):
         self._add_ref_point(key, servo, angle, f"{what} {z:g} cm")
         return True, f"{what} {z:g} cm → açı={angle:g}° (servo={servo:g})"
 
-    def _calib_focal_val(self, dist: float):
-        """Odak kalibrasyonu (ortak): kup OLCULEN mesafede + tespitliyken
-        cam_f = bh_px * mesafe / kup_kenari. Donus: (basari, mesaj)."""
-        d = self.detection_state.get(AGV)
-        if not d:
-            return False, "Önce küp tespit edilmeli (🎯 Tespit aç)"
-        kin = (self.pickup_cfg.setdefault("autonomous", {})
-               .setdefault("kinematics", {}))
-        cube = float(self._kin().get("cube_cm") or 4.0)
-        bh = float(d.get("h") or 0)
-        if bh <= 0 or dist <= 0:
-            return False, "geçersiz ölçüm (bh veya mesafe 0)"
-        kin["cam_f"] = round(bh * dist / cube, 1)
-        self._refresh_kin_status()
-        return True, (f"odak: bh={bh:.0f}px @ {dist:g}cm, küp {cube:g}cm → "
-                      f"cam_f={kin['cam_f']} px")
+    # (olu kod temizligi: _clear_refs + _calib_focal_val kaldirildi — eski
+    # manuel panel kalintilariydi; sihirbaz kendi _clr/_solve_cam'ini kullanir)
 
     def _refresh_kin_status(self):
         m = ArmModel(self._kin())

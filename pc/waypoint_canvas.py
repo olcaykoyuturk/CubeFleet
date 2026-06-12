@@ -91,20 +91,6 @@ class WaypointCanvas(ctk.CTkFrame):
     # -------------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------------
-    def set_state(self, current: str = "", target: str = "",
-                  path: str = "", heading: str = ""):
-        """Tek-AGV API (geriye donuk)."""
-        self.current_wp = (current or "").strip()
-        self.target_wp  = (target or "").strip()
-        self.heading    = (heading or "").strip().upper()
-
-        # path "A>B>E>H" formatinda
-        path = (path or "").strip()
-        self.path_wps = [p.strip() for p in path.split(">") if p.strip()] if path else []
-        # multi-AGV state'i temizle (mix kullanim olmasin)
-        self.fleet = []
-        self._redraw()
-
     def set_fleet_state(self, agvs: List[FleetAGVDisplay]):
         """Multi-AGV API (planner viewer / fleet dashboard).
 
