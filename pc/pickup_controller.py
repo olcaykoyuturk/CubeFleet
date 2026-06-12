@@ -202,10 +202,19 @@ class PickupController:
         self._grace = 0
 
     # ------------------------------------------------------------------ kontrol
+    def _app_cfg(self) -> dict:
+        """Bu AGV'nin kapma config'i. Yeni per-AGV API (`app._pickup_cfg(agv_id)`)
+        varsa onu kullan; yoksa (test FakeApp) tekil `app.pickup_cfg`'e dus."""
+        getter = getattr(self.app, "_pickup_cfg", None)
+        if callable(getter):
+            return getter(self.agv_id) or {}
+        cfg = getattr(self.app, "pickup_cfg", None)
+        return cfg if isinstance(cfg, dict) else {}
+
     def start(self) -> bool:
         """MEVCUT kol pozundan baslat. Zarf + kinematik kalibrasyon (olculer +
         4 referans) eksikse reddeder ve neyin eksik oldugunu soyler."""
-        auto = (getattr(self.app, "pickup_cfg", None) or {}).get("autonomous", {})
+        auto = self._app_cfg().get("autonomous", {})
         self._cfg = {**self.DEFAULTS, **auto}
         if self._envelope() is None:
             self._set("IDLE", "Önce arm_sim SINIR SİHİRBAZI'nı çalıştırıp kaydet.")

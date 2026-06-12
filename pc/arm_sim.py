@@ -32,9 +32,12 @@ import urllib.request
 
 import customtkinter as ctk
 
+from agv_config import pickup_config_path, default_cam_ip
 from pickup_controller import gr_band, interp_band
 
-PICKUP_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickup_config.json")
+# Kalibrasyon DOSYASI + kamera HEDEF AGV'ye gore secilir (self.target_agv) —
+# her kol fiziksel olarak farkli, pickup_config_<AGV_ID>.json ayri tutulur.
+TARGET_AGVS = ("AGV_1", "AGV_2")
 
 SH_STEP = 15      # FAZ 1 shoulder duraklari (0..180)
 GR_SH_STEP = 30   # FAZ 2 shoulder satirlari
@@ -60,7 +63,10 @@ class ArmRecord(ctk.CTk):
         self.geometry("1060x680")
         ctk.set_appearance_mode("dark")
 
-        self.cam_url = "http://192.168.4.50"
+        # Hedef AGV — kalibrasyon dosyasini + kamera IP'sini belirler. AGV_2
+        # zarfini olcerken AGV_1'inki ezilmesin diye ayri dosya.
+        self.target_agv = "AGV_1"
+        self.cam_url = f"http://{default_cam_ip(self.target_agv)}"
         self.live = False
         self.base, self.shoulder, self.elbow, self.gripper = 90, 120, 60, 110
         self._last_send: dict = {}
@@ -86,9 +92,13 @@ class ArmRecord(ctk.CTk):
                       "Yeniden ölçmek için ▶ Sihirbazı Başlat.")
 
     # ----------------------------------------------------------------- IO
+    def _cfg_path(self) -> str:
+        """Hedef AGV'nin kalibrasyon dosyasi (pickup_config_<AGV_ID>.json)."""
+        return pickup_config_path(self.target_agv)
+
     def _load(self):
         try:
-            with open(PICKUP_CFG, encoding="utf-8") as f:
+            with open(self._cfg_path(), encoding="utf-8") as f:
                 cfg = json.load(f)
             env = (cfg.get("autonomous", {}) or {}).get("safe_envelope", {})
             if env.get("type") == "limits" and env.get("sh_grid"):
@@ -97,25 +107,28 @@ class ArmRecord(ctk.CTk):
                 self.el_max = [None if v is None else int(v) for v in env["el_max"]]
                 self.gr_rows = env.get("gr_rows", []) or []
                 self.phase = 3
+            else:
+                self.phase = 0   # bu AGV'de zarf yok — sihirbaz bastan
         except Exception:
             pass
 
     def _save(self):
+        path = self._cfg_path()
         try:
             cfg = {}
-            if os.path.exists(PICKUP_CFG):
-                with open(PICKUP_CFG, encoding="utf-8") as f:
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
                     cfg = json.load(f)
             cfg.setdefault("autonomous", {})["safe_envelope"] = {
                 "type": "limits", "margin_deg": MARGIN,
                 "sh_grid": self.sh_grid, "el_min": self.el_min, "el_max": self.el_max,
                 "gr_rows": self.gr_rows,
             }
-            with open(PICKUP_CFG, "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=2)
             n1 = sum(1 for v in self.el_min if v is not None)
             n2 = sum(1 for r in self.gr_rows for v in r["lo"] if v is not None)
-            self._log(f"💾 KAYDEDİLDİ → pickup_config.json "
+            self._log(f"💾 KAYDEDİLDİ → {os.path.basename(path)} "
                       f"({n1}/{len(self.sh_grid)} shoulder durağı, "
                       f"{n2} gripper kombinasyonu)")
         except Exception as e:
@@ -141,6 +154,18 @@ class ArmRecord(ctk.CTk):
         self._slider(left, "shoulder", "Shoulder")
         self._slider(left, "elbow", "Elbow")
         self._slider(left, "gripper", "Gripper")
+
+        arow = ctk.CTkFrame(left, fg_color="transparent")
+        arow.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(arow, text="🚜 Hedef AGV:", font=("", 12, "bold")
+                     ).pack(side="left")
+        self.target_agv_var = ctk.StringVar(value=self.target_agv)
+        ctk.CTkOptionMenu(arow, values=list(TARGET_AGVS), width=104,
+                          variable=self.target_agv_var,
+                          command=self._select_target_agv).pack(side="left", padx=6)
+        self.cfg_lbl = ctk.CTkLabel(arow, text=os.path.basename(self._cfg_path()),
+                                    font=("", 10), text_color="#888")
+        self.cfg_lbl.pack(side="left", padx=4)
 
         urow = ctk.CTkFrame(left, fg_color="transparent")
         urow.pack(fill="x", pady=(6, 2))
@@ -245,6 +270,37 @@ class ArmRecord(ctk.CTk):
                                 fg_color="#3fbf66" if self.live else "#444")
         self._log("🔌 Canlı mod AÇIK — slider'lar gerçek kolu sürüyor."
                   if self.live else "🔌 Canlı mod KAPALI.")
+
+    def _select_target_agv(self, agv: str):
+        """Hedef AGV degisti → o AGV'nin zarf dosyasini + kamera IP'sini yukle.
+        Zarf state'i tamamen degisir (her kol ayri); sihirbaz bastan/kayittan."""
+        if agv == self.target_agv:
+            return
+        if self.live:                  # eski AGV canlisini kapat
+            self._toggle_live()
+        self.target_agv = agv
+        self.cam_url = f"http://{default_cam_ip(agv)}"
+        # zarf state sifirla, sonra yeni AGV dosyasini yukle
+        self.sh_grid = list(range(0, 181, SH_STEP))
+        self.el_min = [None] * len(self.sh_grid)
+        self.el_max = [None] * len(self.sh_grid)
+        self.gr_rows = []
+        self.stops2 = []
+        self.phase = 0
+        self.step = 0
+        self._manual_next = True
+        self._load()
+        try:
+            self.url.delete(0, "end")
+            self.url.insert(0, self.cam_url)
+            self.cfg_lbl.configure(text=os.path.basename(self._cfg_path()))
+        except Exception:
+            pass
+        self._wiz_status()
+        self._redraw()
+        st = "kayıt yüklendi" if self.phase == 3 else "zarf YOK — sihirbazı başlat"
+        self._log(f"🔀 Hedef AGV: {agv} → {os.path.basename(self._cfg_path())} "
+                  f"({st})")
 
     def _send(self, sid, angle, force=False):
         now = time.time()

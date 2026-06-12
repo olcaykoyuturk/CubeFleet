@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from typing import Dict
 
@@ -39,19 +40,49 @@ DEFAULT_CAM_IP_BASE = 50
 DEFAULT_CAM_STREAM_PORT  = 81
 DEFAULT_CAM_CONTROL_PORT = 80
 
+_PC_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def default_cam_urls(agv_id: str) -> tuple[str, str]:
-    """AGV_1, AGV_2, ... isminden default kamera URL'lerini tahmin et.
-    Kullanici manuel override yapabilir."""
+
+def default_cam_ip(agv_id: str) -> str:
+    """AGV_1→.50, AGV_2→.51, ... (CAM_IP_OCT_4 ile uyumlu)."""
     try:
         n = int(agv_id.split("_")[-1])
     except (ValueError, IndexError):
         n = 1
-    ip = f"192.168.4.{DEFAULT_CAM_IP_BASE + n - 1}"
+    return f"192.168.4.{DEFAULT_CAM_IP_BASE + n - 1}"
+
+
+def default_cam_urls(agv_id: str) -> tuple[str, str]:
+    """AGV_1, AGV_2, ... isminden default kamera URL'lerini tahmin et.
+    Kullanici manuel override yapabilir."""
+    ip = default_cam_ip(agv_id)
     return (
         f"http://{ip}:{DEFAULT_CAM_STREAM_PORT}/stream",
         f"http://{ip}:{DEFAULT_CAM_CONTROL_PORT}",
     )
+
+
+def pickup_config_path(agv_id: str) -> str:
+    """AGV'nin kol kalibrasyon dosyasi (kinematik + zarf + trim). HER kol
+    fiziksel olarak farkli (servo offset, kamera pozu) → AGV bazinda AYRI
+    dosya, karismasin: pickup_config_AGV_1.json, pickup_config_AGV_2.json, ...
+    pickup_test.py / arm_sim.py / agv_control.py ayni AGV icin ayni dosyayi
+    kullanir."""
+    safe = (agv_id or "AGV_1").replace("/", "_").replace("\\", "_")
+    return os.path.join(_PC_DIR, f"pickup_config_{safe}.json")
+
+
+def migrate_legacy_pickup_config(agv_id: str = "AGV_1") -> None:
+    """Eski TEK pickup_config.json'i (per-AGV ayrimi oncesi) ilgili AGV'nin
+    dosyasina KOPYALA — bir kez, hedef yoksa. Kullanicinin mevcut AGV_1
+    kalibrasyonu kaybolmasin. Eski dosya yerinde kalir (gitignore)."""
+    legacy = os.path.join(_PC_DIR, "pickup_config.json")
+    target = pickup_config_path(agv_id)
+    if os.path.exists(legacy) and not os.path.exists(target):
+        try:
+            shutil.copy2(legacy, target)
+        except OSError:
+            pass
 
 
 @dataclass

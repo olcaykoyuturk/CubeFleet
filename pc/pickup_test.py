@@ -46,16 +46,19 @@ import customtkinter as ctk
 import cv2
 from PIL import Image
 
+from agv_config import pickup_config_path, default_cam_ip
 from arm_kinematics import (ArmModel, DEFAULTS as KIN_DEFAULTS,
                             point_from_height, calibrate_camera)
 from detector import get_detector
 from pickup_controller import PickupController, interp_band, gr_band
 from stream_reader import StreamReader
 
-PICKUP_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickup_config.json")
 DATASET_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            "dataset2")   # repo koku / dataset2
-AGV = "TEST"   # tek kol — sabit anahtar
+AGV = "TEST"   # tek kol — RAM ic anahtari (arm_servo_vars/detection_state/...)
+# Kalibrasyon DOSYASI + kamera HEDEF AGV'ye gore (self.target_agv) secilir —
+# her kol fiziksel olarak farkli, pickup_config_<AGV_ID>.json ayri tutulur.
+TARGET_AGVS = ("AGV_1", "AGV_2")
 
 SERVO_NAMES = ("Base", "Shoulder", "Elbow", "Gripper")
 SERVO_HOME = (93, 120, 60, 110)
@@ -68,6 +71,10 @@ class PickupTest(ctk.CTk):
         self.geometry("1280x760")
         ctk.set_appearance_mode("dark")
 
+        # Hedef AGV — kalibrasyon DOSYASINI + kamera IP'sini belirler. AGV_2
+        # icin kalibrasyon yaparken AGV_1'inki ezilmesin diye ayri dosya.
+        self.target_agv = "AGV_1"
+
         # --- PickupController'in bekledigi app arayuzu ---
         self.detection_state: dict = {}
         self.grip_state: dict = {}
@@ -76,7 +83,7 @@ class PickupTest(ctk.CTk):
         self.arm_servo_vars: dict = {AGV: [ctk.IntVar(value=v) for v in SERVO_HOME]}
         self.servo_sliders: dict = {}   # idx -> (slider, label, isim)
 
-        self.cam_url = "http://192.168.4.50"
+        self.cam_url = f"http://{default_cam_ip(self.target_agv)}"
         self.reader: StreamReader | None = None
         self.detect_on = False
         self.pc: PickupController | None = None
@@ -110,9 +117,13 @@ class PickupTest(ctk.CTk):
                       " — ölçüleri gir + 📐 referansları yakala")
 
     # ------------------------------------------------------------------ cfg
+    def _cfg_path(self) -> str:
+        """Hedef AGV'nin kalibrasyon dosyasi (pickup_config_<AGV_ID>.json)."""
+        return pickup_config_path(self.target_agv)
+
     def _load_cfg(self) -> dict:
         try:
-            with open(PICKUP_CFG, encoding="utf-8") as f:
+            with open(self._cfg_path(), encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {}
@@ -120,14 +131,41 @@ class PickupTest(ctk.CTk):
     def _save_cfg(self):
         # ATOMIK yazim (tmp + os.replace): agv_control da ayni dosyaya yazar;
         # yarida kesilen json.dump dosyayi bozuyordu.
+        path = self._cfg_path()
         try:
-            tmp = PICKUP_CFG + ".tmp"
+            tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.pickup_cfg, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, PICKUP_CFG)
-            self.log(f"💾 config kaydedildi → {PICKUP_CFG}")
+            os.replace(tmp, path)
+            self.log(f"💾 config kaydedildi → {os.path.basename(path)}")
         except Exception as e:
             self.log(f"❌ config kaydedilemedi: {e}")
+
+    def _select_target_agv(self, agv: str):
+        """Hedef AGV degisti → config dosyasini + kamera IP'sini yeniden yukle.
+        Acik yayini kapatir (kullanici yeni AGV'ye baglanmali)."""
+        if agv == self.target_agv:
+            return
+        self.target_agv = agv
+        self.pickup_cfg = self._load_cfg()
+        self.cam_url = f"http://{default_cam_ip(agv)}"
+        try:
+            self.url.delete(0, "end")
+            self.url.insert(0, self.cam_url)
+            self.cfg_lbl.configure(text=os.path.basename(self._cfg_path()))
+        except Exception:
+            pass
+        if self.reader is not None:        # eski AGV yayinini kapat
+            self._toggle_stream()
+        self.log(f"🔀 Hedef AGV: {agv} → {os.path.basename(self._cfg_path())} "
+                 f"| kamera {self.cam_url}")
+        auto = self.pickup_cfg.get("autonomous", {}) or {}
+        env = auto.get("safe_envelope") or {}
+        self.log("  ✅ güvenli bölge kayıtlı" if env.get("sh_grid")
+                 else "  ⚠ güvenli bölge YOK (arm_sim sihirbazı)")
+        miss = ArmModel(auto.get("kinematics") or {}).missing()
+        self.log("  ✅ kinematik hazır" if not miss
+                 else "  ⚠ kinematik eksik: " + ", ".join(miss))
 
     # ------------------------------------------------------------------ UI
     def _build(self):
@@ -145,9 +183,24 @@ class PickupTest(ctk.CTk):
         self.logbox.pack(side="bottom", fill="both", expand=True)
         self.logbox.configure(state="disabled")
 
+        # SOL: hedef AGV (kalibrasyon dosyasi + kamera bunu izler)
+        agv_row = ctk.CTkFrame(left, fg_color="transparent")
+        agv_row.pack(fill="x", pady=(2, 2))
+        ctk.CTkLabel(agv_row, text="🚜 Hedef AGV:", font=("", 13, "bold")
+                     ).pack(side="left")
+        self.target_agv_var = ctk.StringVar(value=self.target_agv)
+        ctk.CTkOptionMenu(agv_row, values=list(TARGET_AGVS), width=110,
+                          variable=self.target_agv_var,
+                          command=self._select_target_agv
+                          ).pack(side="left", padx=6)
+        self.cfg_lbl = ctk.CTkLabel(left,
+                                    text=os.path.basename(self._cfg_path()),
+                                    font=("", 10), text_color="#888")
+        self.cfg_lbl.pack(anchor="w", padx=2)
+
         # SOL: baglanti
         ctk.CTkLabel(left, text="📷 ESP32-CAM", font=("", 13, "bold")
-                     ).pack(anchor="w", pady=(2, 2))
+                     ).pack(anchor="w", pady=(6, 2))
         self.url = ctk.CTkEntry(left)
         self.url.insert(0, self.cam_url)
         self.url.pack(fill="x", padx=2)

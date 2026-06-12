@@ -25,7 +25,8 @@ import cv2
 
 from agv_ws_client       import AGVClient, AGVState, LogEvent, CalibrationDataEvent
 from calibration_presets import PresetStore
-from agv_config          import AGVConfigStore
+from agv_config          import (AGVConfigStore, pickup_config_path,
+                                  migrate_legacy_pickup_config)
 from waypoint_canvas     import WaypointCanvas, FleetAGVDisplay
 from stream_reader       import StreamReader
 from detector            import get_detector
@@ -40,7 +41,7 @@ from fleet_planner       import (
 
 
 SERVER_URL_DEFAULT = "ws://192.168.4.1/ws"
-PICKUP_CFG_PATH    = os.path.join(os.path.dirname(__file__), "pickup_config.json")
+# Kapma config'i AGV BAZINDA ayri dosya — bkz. agv_config.pickup_config_path.
 WAYPOINTS          = list("ABCDEFGHI")
 
 
@@ -176,11 +177,12 @@ class AGVControlApp(ctk.CTk):
         self.arm_view_mode:   str  = "dual"   # "dual" | "single"
         self.arm_single_agv:  Optional[str] = None   # single mode'da gösterilen AGV
 
-        # Kapma konfig (pickup_config.json) — autonomous.safe_envelope (arm_sim
-        # sinir sihirbazi) + ready_pose/aim/esik degerleri. Eski manuel tarama
-        # kalibrasyonu (base sweep state machine) KALDIRILDI — tarama artik
-        # PickupController.SCAN durumunun isi.
-        self.pickup_cfg: Dict = self._pickup_load_config()
+        # Kapma konfig — AGV BAZINDA ayri dosya (pickup_config_<AGV_ID>.json):
+        # autonomous.safe_envelope (arm_sim) + kinematics + trim. Her kol fiziksel
+        # olarak farkli oldugundan AGV bazinda RAM cache; _pickup_cfg(agv_id) lazy
+        # yukler. Eski tek pickup_config.json varsa AGV_1'e migrate edilir.
+        migrate_legacy_pickup_config("AGV_1")
+        self.pickup_cfgs: Dict[str, Dict] = {}
 
         # ESP32-CAM log polling — her AGV icin ayri thread, AGV connect olunca
         # otomatik baslar. Stream sekmesinden bagimsiz: GRIP olaylari Arm
@@ -2288,29 +2290,45 @@ class AGVControlApp(ctk.CTk):
     # eski background-subtraction tabanli tespit pipeline'i ile birlikte
     # kaldirildi. Yeni detector eklendiginde burada karsiliklari yazilacak.
 
-    # ---------- Kapma kalibrasyonu: konfig I/O ----------
-    def _pickup_load_config(self) -> Dict:
+    # ---------- Kapma kalibrasyonu: konfig I/O (AGV BAZINDA AYRI dosya) ----------
+    # Her kol fiziksel olarak farkli (servo offset, kamera pozu) → her AGV'nin
+    # kendi pickup_config_<AGV_ID>.json'u. RAM'de per-AGV cache (pickup_cfgs).
+    def _pickup_load_config(self, agv_id: str) -> Dict:
         import json
         try:
-            with open(PICKUP_CFG_PATH, "r", encoding="utf-8") as f:
+            with open(pickup_config_path(agv_id), "r", encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
             return {}
         except Exception as e:
-            print(f"pickup_config yuklenemedi: {e}")
+            print(f"pickup_config ({agv_id}) yuklenemedi: {e}")
             return {}
 
-    def _pickup_save_config(self):
-        """ATOMIK yazim (tmp + os.replace): pickup_test.py de ayni dosyaya
-        yazabilir; yarida kesilen json.dump dosyayi bozuyordu."""
+    def _pickup_cfg(self, agv_id: str) -> Dict:
+        """agv_id'nin kapma config'i (lazy-load + cache). PickupController da
+        bunu `app._pickup_cfg(agv_id)` ile okur (per-AGV ayrim)."""
+        cfg = self.pickup_cfgs.get(agv_id)
+        if cfg is None:
+            cfg = self._pickup_load_config(agv_id)
+            self.pickup_cfgs[agv_id] = cfg
+        return cfg
+
+    def _pickup_save_config(self, agv_id: str):
+        """ATOMIK yazim (tmp + os.replace): pickup_test.py/arm_sim.py de ayni
+        AGV dosyasina yazabilir; yarida kesilen json.dump dosyayi bozuyordu."""
         import json
+        cfg = self.pickup_cfgs.get(agv_id)
+        if cfg is None:
+            return
+        path = pickup_config_path(agv_id)
         try:
-            tmp = PICKUP_CFG_PATH + ".tmp"
+            tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.pickup_cfg, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, PICKUP_CFG_PATH)
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, path)
         except Exception as e:
-            self._set_status(f"pickup_config kaydedilemedi: {e}", err=True)
+            self._set_status(f"pickup_config ({agv_id}) kaydedilemedi: {e}",
+                             err=True)
 
     # ---------- OTONOM KAPMA (PickupController v4 entegrasyonu) ----------
     def _build_arm_pickup_panel(self, parent, agv_id: str):
@@ -2320,9 +2338,10 @@ class AGVControlApp(ctk.CTk):
         from arm_kinematics import ArmModel
         ctk.CTkLabel(parent, text="🤖 OTONOM KAPMA",
                      font=self.font_h2).pack(pady=(8, 2))
-        kin = (self.pickup_cfg.get("autonomous", {}) or {}).get("kinematics") or {}
+        cfg = self._pickup_cfg(agv_id)
+        kin = (cfg.get("autonomous", {}) or {}).get("kinematics") or {}
         miss = ArmModel(kin).missing()
-        env = (self.pickup_cfg.get("autonomous", {}) or {}).get("safe_envelope")
+        env = (cfg.get("autonomous", {}) or {}).get("safe_envelope")
         ready = (not miss) and bool(env and env.get("sh_grid"))
         if not ready:
             txt = ("⚠ Kalibrasyon eksik — pickup_test.py 'KİNEMATİK SİHİRBAZI' ile "
@@ -2378,7 +2397,7 @@ class AGVControlApp(ctk.CTk):
         ctk.CTkButton(parent, text="↺ ince ayar sıfırla", fg_color=COL_MUTED,
                       command=lambda a=agv_id: self._pickup_trim_reset(a)
                       ).pack(anchor="w", padx=10, pady=2)
-        self._pickup_refresh_trim_lbl()
+        self._pickup_refresh_trim_lbl(agv_id)
 
     def _pickup_get(self, agv_id: str):
         """agv_id için PickupController (lazy oluştur)."""
@@ -2393,8 +2412,8 @@ class AGVControlApp(ctk.CTk):
         if not (self.detect_vars.get(agv_id) and self.detect_vars[agv_id].get()):
             self._set_status("Önce 🎯 YOLO Tespit'i aç (Arm sekmesi)", err=True)
             return
-        # Diskten taze config (sihirbaz güncellemiş olabilir)
-        self.pickup_cfg = self._pickup_load_config()
+        # Diskten taze config (sihirbaz güncellemiş olabilir) — sadece bu AGV
+        self.pickup_cfgs[agv_id] = self._pickup_load_config(agv_id)
         pc = self.auto_pickup.get(agv_id)
         if pc is not None and pc.active:
             self._set_status("Kapma zaten çalışıyor", err=True)
@@ -2440,30 +2459,30 @@ class AGVControlApp(ctk.CTk):
             pass
 
     def _pickup_trim(self, agv_id: str, key: str, delta: float):
-        auto = self.pickup_cfg.setdefault("autonomous", {})
+        auto = self._pickup_cfg(agv_id).setdefault("autonomous", {})
         auto[key] = round(float(auto.get(key, 0) or 0) + delta, 2)
         pc = self.auto_pickup.get(agv_id)
         if pc is not None:
             pc._cfg[key] = auto[key]
-        self._pickup_save_config()
-        self._pickup_refresh_trim_lbl()
+        self._pickup_save_config(agv_id)
+        self._pickup_refresh_trim_lbl(agv_id)
         self._pickup_log(agv_id, f"ince ayar {key} = {auto[key]:+g}")
 
     def _pickup_trim_reset(self, agv_id: str):
-        auto = self.pickup_cfg.setdefault("autonomous", {})
+        auto = self._pickup_cfg(agv_id).setdefault("autonomous", {})
         for k in ("aim_trim_fwd", "aim_trim_lat", "grab_gamma_off"):
             auto[k] = 0.0
             pc = self.auto_pickup.get(agv_id)
             if pc is not None:
                 pc._cfg[k] = 0.0
-        self._pickup_save_config()
-        self._pickup_refresh_trim_lbl()
+        self._pickup_save_config(agv_id)
+        self._pickup_refresh_trim_lbl(agv_id)
 
-    def _pickup_refresh_trim_lbl(self):
+    def _pickup_refresh_trim_lbl(self, agv_id: str):
         lbl = getattr(self, "_pickup_trim_lbl", None)
         if lbl is None:
             return
-        auto = self.pickup_cfg.get("autonomous", {}) or {}
+        auto = self._pickup_cfg(agv_id).get("autonomous", {}) or {}
         f = float(auto.get("aim_trim_fwd", 0) or 0)
         la = float(auto.get("aim_trim_lat", 0) or 0)
         ga = float(auto.get("grab_gamma_off", 0) or 0)
@@ -3002,8 +3021,8 @@ class AGVControlApp(ctk.CTk):
         op["phase"] = "RELEASE"
         self._refresh_cube_panel()
         from arm_kinematics import ArmModel
-        self.pickup_cfg = self._pickup_load_config()
-        auto = (self.pickup_cfg.get("autonomous") or {})
+        self.pickup_cfgs[agv_id] = self._pickup_load_config(agv_id)
+        auto = (self.pickup_cfgs[agv_id].get("autonomous") or {})
         kin = auto.get("kinematics") or {}
         model = ArmModel(kin)
         drop_fwd = float(auto.get("drop_fwd_cm", 13.0) or 13.0)
