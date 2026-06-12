@@ -359,12 +359,14 @@ class AGVControlApp(ctk.CTk):
 
         self.tab_dashboard  = self.tabs.add("Dashboard")
         self.tab_operations = self.tabs.add("Operations")
+        self.tab_cubes      = self.tabs.add("Küpler")
         self.tab_arm        = self.tabs.add("Arm")
         self.tab_sensors    = self.tabs.add("Sensors")
         self.tab_log        = self.tabs.add("Log")
 
         # İnşa sırası: Operations en bastaki map_widget'i diger tab'lar referansliyor
         self._build_tab_operations()
+        self._build_tab_cubes()
         self._build_tab_dashboard()
         self._build_tab_arm()
         self._build_tab_sensors()
@@ -447,8 +449,7 @@ class AGVControlApp(ctk.CTk):
         self.heading_lbl = ctk.CTkLabel(cmd_frame, text="Yon: -", anchor="w")
         self.heading_lbl.pack(fill="x", padx=12, pady=(0, 6))
 
-        # Kup yonetimi (yerlestir / al / birak + manuel faceDir)
-        self._build_cube_panel(cmd_frame)
+        # (Kup yonetimi kendi sekmesinde: "Küpler" — _build_tab_cubes)
 
         # (PID + Hiz kontrolleri Sensors sekmesine tasindi — kalibrasyon
         # panelinin altinda; _build_pid_panel)
@@ -1452,8 +1453,9 @@ class AGVControlApp(ctk.CTk):
             self._refresh_cube_panel()
             actions.append("Kup operasyonlari iptal")
         try:
-            if self.map_widget.placing:
-                self.map_widget.cancel_placement()
+            if self.cube_map.placing:
+                self.cube_map.cancel_placement()
+                self._cube_hint("")
         except Exception:
             pass
 
@@ -1612,6 +1614,7 @@ class AGVControlApp(ctk.CTk):
         self._update_preset_panel()
         self._refresh_arm_panel()          # aktif AGV değişti → kol panelini yeniden inşa
         self._update_active_agv_indicator()
+        self._refresh_cube_panel()         # Bırak butonu aktif AGV'ye bağlı
 
     # =========================================================================
     # Aktif AGV gosterimi
@@ -2115,6 +2118,14 @@ class AGVControlApp(ctk.CTk):
                 target     = (s.targetWaypoint or None) if agv_id == self.active_agv else None,
             ))
         self.map_widget.set_fleet_state(fleet)
+        # Kup sekmesi haritasina ayni filo gorunumu — yalniz sekme acikken
+        # (gizliyken canvas cizim maliyetine girme; sekmeye gecince
+        # _on_tab_changed tek seferlik tazeler)
+        try:
+            if self.tabs.get() == "Küpler":
+                self.cube_map.set_fleet_state(fleet)
+        except Exception:
+            pass
 
     # =========================================================================
     # F4 — Per-AGV kamera yönetimi
@@ -2469,86 +2480,132 @@ class AGVControlApp(ctk.CTk):
     CUBE_FACE_TIMEOUT_S   = 40.0    # faceDir → faceComplete
     CUBE_WARMUP_TIMEOUT_S = 8.0     # stream + YOLO ilk tespit
 
-    def _build_cube_panel(self, parent):
-        ctk.CTkLabel(parent, text="📦 KÜPLER", font=self.font_h2).pack(pady=(4, 0))
-        self.cube_rows_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        self.cube_rows_frame.pack(fill="x", padx=12, pady=(2, 0))
+    def _build_tab_cubes(self):
+        """Küpler sekmesi: SOL — küplere ait büyük harita (yerleştirme/bırakma
+        kenar seçimi burada yapılır, AGV'ler de görünür) | SAĞ — 4 küp kartı
+        (durum + aksiyonlar) + iptal + manuel faceDir testi."""
+        tab = self.tab_cubes
+        tab.grid_columnconfigure(0, weight=2)
+        tab.grid_columnconfigure(1, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
 
-        act = ctk.CTkFrame(parent, fg_color="transparent")
-        act.pack(fill="x", padx=12, pady=(2, 0))
-        ctk.CTkButton(act, text="📦 Bırak", width=80, height=26,
-                      fg_color=COL_WARN, hover_color=COL_WARN_HOVER,
-                      font=self.font_small,
-                      command=self._cube_drop_begin).pack(side="left", expand=True,
-                                                          fill="x", padx=(0, 2))
-        ctk.CTkButton(act, text="✖ İptal", width=70, height=26,
-                      fg_color=COL_MUTED, font=self.font_small,
-                      command=self._cube_op_cancel).pack(side="left", expand=True,
-                                                         fill="x", padx=(2, 0))
+        # SOL: harita
+        map_frame = ctk.CTkFrame(tab)
+        map_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        ctk.CTkLabel(map_frame, text="KÜP HARİTASI",
+                     font=self.font_h2).pack(pady=(6, 0))
+        self.cube_hint_lbl = ctk.CTkLabel(map_frame, text="", height=18,
+                                          font=self.font_small,
+                                          text_color=COL_TXT_WARN)
+        self.cube_hint_lbl.pack(fill="x", padx=8)
+        self.cube_map = WaypointCanvas(map_frame, on_target_click=None)
+        self.cube_map.pack(fill="both", expand=True, padx=8, pady=(2, 8))
+
+        # SAĞ: kartlar + aksiyonlar
+        side = ctk.CTkFrame(tab)
+        side.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        ctk.CTkLabel(side, text="📦 KÜPLER", font=self.font_h1).pack(pady=(10, 4))
+        self.cube_rows_frame = ctk.CTkFrame(side, fg_color="transparent")
+        self.cube_rows_frame.pack(fill="x", padx=10)
+
+        self.cube_op_lbl = ctk.CTkLabel(side, text="", anchor="w",
+                                        justify="left", font=self.font_small,
+                                        text_color=COL_TXT_ACCENT, wraplength=280)
+        self.cube_op_lbl.pack(fill="x", padx=12, pady=(8, 2))
+
+        ctk.CTkButton(side, text="✖ İptal (yerleştirme / operasyon)", height=30,
+                      fg_color=COL_MUTED,
+                      command=self._cube_op_cancel).pack(fill="x", padx=12,
+                                                         pady=(2, 8))
 
         # Manuel faceDir — öğrenilen süreli dönüşü sahada tek tuşla test etmek için
-        face = ctk.CTkFrame(parent, fg_color="transparent")
-        face.pack(fill="x", padx=12, pady=(2, 6))
-        ctk.CTkLabel(face, text="Yüz dön:", font=self.font_small,
-                     text_color=COL_MUTED).pack(side="left", padx=(0, 4))
-        for lbl, d in (("K", "N"), ("D", "E"), ("G", "S"), ("B", "W")):
-            ctk.CTkButton(face, text=lbl, width=34, height=24,
+        face_box = ctk.CTkFrame(side)
+        face_box.pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkLabel(face_box, text="YÜZ DÖNDÜR (faceDir testi)",
+                     font=self.font_small, text_color=COL_MUTED).pack(pady=(6, 2))
+        face = ctk.CTkFrame(face_box, fg_color="transparent")
+        face.pack(fill="x", padx=8, pady=(0, 8))
+        for lbl, d in (("⬆ Kuzey", "N"), ("➡ Doğu", "E"),
+                       ("⬇ Güney", "S"), ("⬅ Batı", "W")):
+            ctk.CTkButton(face, text=lbl, width=64, height=28,
                           fg_color=COL_INFO, hover_color=COL_INFO_HOVER,
                           font=self.font_small,
                           command=lambda dd=d: self._cube_face_manual(dd)
-                          ).pack(side="left", expand=True, fill="x", padx=1)
-
-        self.cube_op_lbl = ctk.CTkLabel(parent, text="", anchor="w",
-                                        font=self.font_small,
-                                        text_color=COL_SUBTLE)
-        self.cube_op_lbl.pack(fill="x", padx=12, pady=(0, 4))
+                          ).pack(side="left", expand=True, fill="x", padx=2)
+        ctk.CTkLabel(side, text="Çizgili yöne sensörlü, çizgisiz yöne öğrenilen\n"
+                                "süreyle döner; küp kenarına dönüşte kullanılır.",
+                     font=self.font_small, text_color=COL_SUBTLE,
+                     justify="left").pack(anchor="w", padx=14, pady=(0, 8))
         self._refresh_cube_panel()
 
     def _refresh_cube_panel(self):
-        """4 küp satırını yeniden kur (ucuz: 4 satır; store/op değişiminde)."""
+        """4 küp kartını yeniden kur (ucuz; store/op değişiminde çağrılır)."""
         if not hasattr(self, "cube_rows_frame"):
             return
         for w in self.cube_rows_frame.winfo_children():
             w.destroy()
+        active = self.active_agv
         for cid, c in sorted(self.cube_store.cubes.items()):
-            row = ctk.CTkFrame(self.cube_rows_frame, fg_color="transparent")
-            row.pack(fill="x", pady=1)
+            card = ctk.CTkFrame(self.cube_rows_frame)
+            card.pack(fill="x", pady=3)
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.pack(fill="x", padx=8, pady=(6, 2))
+            ctk.CTkLabel(top, text="■", text_color="#ff9f1a",
+                         width=16, font=self.font_h1).pack(side="left")
             if c.carried:
-                txt, col = f"K{cid} 🚚 {c.carrier}", COL_TXT_WARN
+                txt, col = f"K{cid}  —  🚚 {c.carrier} taşıyor", COL_TXT_WARN
             elif c.placed:
-                txt = f"K{cid} {c.node}·{SIDE_LABELS_TR.get(c.side or '', c.side)}"
+                txt = (f"K{cid}  —  {c.node} · "
+                       f"{SIDE_LABELS_TR.get(c.side or '', c.side)} kenarı")
                 col = COL_TXT_OK
             else:
-                txt, col = f"K{cid} —", COL_SUBTLE
-            ctk.CTkLabel(row, text=txt, width=92, anchor="w",
-                         font=self.font_small, text_color=col).pack(side="left")
+                txt, col = f"K{cid}  —  yerleştirilmedi", COL_SUBTLE
+            ctk.CTkLabel(top, text=txt, anchor="w", font=self.font_body,
+                         text_color=col).pack(side="left", fill="x", expand=True)
+
+            btns = ctk.CTkFrame(card, fg_color="transparent")
+            btns.pack(fill="x", padx=8, pady=(0, 6))
             if c.placed:
-                ctk.CTkButton(row, text="🧲 Al", width=52, height=22,
+                ctk.CTkButton(btns, text="🧲 Al (aktif AGV)", height=26,
                               fg_color=COL_SUCCESS, hover_color=COL_SUCCESS_HOVER,
                               font=self.font_small,
                               command=lambda i=cid: self._cube_fetch(i)
-                              ).pack(side="left", padx=2)
-                ctk.CTkButton(row, text="✖", width=26, height=22,
+                              ).pack(side="left", expand=True, fill="x", padx=(0, 2))
+                ctk.CTkButton(btns, text="✖ Kaldır", width=70, height=26,
                               fg_color=COL_MUTED, font=self.font_small,
                               command=lambda i=cid: self._cube_remove(i)
-                              ).pack(side="left", padx=1)
-            elif not c.carried:
-                ctk.CTkButton(row, text="📍 Yerleştir", width=84, height=22,
+                              ).pack(side="left", padx=(2, 0))
+            elif c.carried:
+                if c.carrier == active:
+                    ctk.CTkButton(btns, text="📦 Bırak (bu node'a)", height=26,
+                                  fg_color=COL_WARN, hover_color=COL_WARN_HOVER,
+                                  font=self.font_small,
+                                  command=self._cube_drop_begin
+                                  ).pack(side="left", expand=True, fill="x")
+                else:
+                    ctk.CTkLabel(btns, text=f"bırakmak için {c.carrier}'i "
+                                            f"aktif AGV yap",
+                                 font=self.font_small, text_color=COL_SUBTLE
+                                 ).pack(side="left", padx=2)
+            else:
+                ctk.CTkButton(btns, text="📍 Haritadan Yerleştir", height=26,
                               fg_color=COL_INFO, hover_color=COL_INFO_HOVER,
                               font=self.font_small,
                               command=lambda i=cid: self._cube_place_begin(i)
-                              ).pack(side="left", padx=2)
+                              ).pack(side="left", expand=True, fill="x")
         # Aktif operasyon özeti
         if hasattr(self, "cube_op_lbl"):
             ops = [f"{a}: K{o['cube_id']} {o['kind']}/{o['phase']}"
                    for a, o in self.cube_ops.items()]
-            self.cube_op_lbl.configure(text=" | ".join(ops) if ops else "")
+            self.cube_op_lbl.configure(
+                text=("⏳ " + " | ".join(ops)) if ops else "")
 
     def _cubes_redraw(self):
-        """Saha küplerini her iki haritaya bas + panel satırlarını tazele."""
+        """Saha küplerini tüm haritalara bas + küp kartlarını tazele."""
         placed = [(c.cube_id, c.node, c.side)
                   for c in self.cube_store.placed_cubes()]
-        for w in (getattr(self, "map_widget", None),
+        for w in (getattr(self, "cube_map", None),
+                  getattr(self, "map_widget", None),
                   getattr(self, "dash_map", None)):
             if w is not None:
                 w.set_cubes(placed)   # type: ignore[arg-type]
@@ -2564,19 +2621,27 @@ class AGVControlApp(ctk.CTk):
         return [s for s in free_sides(self.fleet_graph, node)
                 if self.cube_store.cube_at(node, s) is None]
 
+    def _cube_hint(self, text: str):
+        lbl = getattr(self, "cube_hint_lbl", None)
+        if lbl is not None:
+            lbl.configure(text=text)
+
     def _cube_place_begin(self, cube_id: int):
         def get_sides(node: str) -> List[str]:
             sides = self._cube_free_sides(node)
             if not sides:
                 self._set_status(f"{node}: boş çizgisiz kenar yok", err=True)
             return sides
-        self.map_widget.begin_placement(
+        self.tabs.set("Küpler")
+        self.cube_map.begin_placement(
             get_sides, lambda n, s: self._cube_place_done(cube_id, n, s))
-        self._set_status(f"K{cube_id}: haritada node tıkla, sonra kenar seç "
-                         f"(✖ İptal ile vazgeç)")
+        self._cube_hint(f"K{cube_id}: önce node'a, sonra turuncu kenar "
+                        f"işaretçisine tıkla (✖ İptal ile vazgeç)")
+        self._set_status(f"K{cube_id}: haritada node tıkla, sonra kenar seç")
 
     def _cube_place_done(self, cube_id: int, node: str, side: str):
         self.cube_store.place(cube_id, node, side)
+        self._cube_hint("")
         self._cube_log("*", f"K{cube_id} yerleştirildi: {node}·"
                             f"{SIDE_LABELS_TR.get(side, side)}")
         self._set_status(f"K{cube_id} → {node}·{SIDE_LABELS_TR.get(side, side)}")
@@ -2736,8 +2801,9 @@ class AGVControlApp(ctk.CTk):
 
     def _cube_op_cancel(self):
         """✖ İptal: harita yerleştirme modu + aktif AGV'nin küp operasyonu."""
-        if self.map_widget.placing:
-            self.map_widget.cancel_placement()
+        if self.cube_map.placing:
+            self.cube_map.cancel_placement()
+            self._cube_hint("")
             self._set_status("Yerleştirme iptal edildi")
             return
         agv = self.active_agv
@@ -2797,6 +2863,7 @@ class AGVControlApp(ctk.CTk):
             return sides if n == node else []
 
         def on_pick(n: str, s: str):
+            self._cube_hint("")
             op = {"kind": "drop", "phase": "FACE", "cube_id": cid,
                   "node": n, "side": s,
                   "deadline": time.time() + self.CUBE_FACE_TIMEOUT_S}
@@ -2805,7 +2872,9 @@ class AGVControlApp(ctk.CTk):
                                 f"{SIDE_LABELS_TR.get(s, s)}")
             self._cube_send_face(agv)
 
-        self.map_widget.begin_placement(get_sides, on_pick, preselect=node)
+        self.tabs.set("Küpler")
+        self.cube_map.begin_placement(get_sides, on_pick, preselect=node)
+        self._cube_hint(f"{agv} @ {node}: bırakılacak kenar işaretçisine tıkla")
         self._set_status(f"{agv} @ {node}: bırakılacak kenarı haritadan seç")
 
     def _cube_release_seq(self, agv_id: str):
@@ -2992,6 +3061,9 @@ class AGVControlApp(ctk.CTk):
         current = self.tabs.get()
         if current == "Sensors" and hasattr(self, "sensor_text"):
             self._refresh_sensor_log()
+        if current == "Küpler" and hasattr(self, "cube_map"):
+            # Gizliyken atlanan filo gorunumunu tek seferlik tazele
+            self._refresh_operations_map()
 
     def _refresh_sensor_log(self):
         flt = self.sensor_filter_var.get()
