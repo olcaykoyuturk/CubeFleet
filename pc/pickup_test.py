@@ -5,31 +5,30 @@ agv_control.py'den BAGIMSIZ calisir: ESP32-CAM'e dogrudan baglanir
 (WS server gerekmez). Amac: kapma sekansini adim adim izleyip sorunu bulmak.
 
 Iceren:
-  * Canli MJPEG + YOLO overlay + HAREKETLI paralaks hedef artisi (anlik bbox
-    yuksekligiyle interpole edilen "kup miknatisin altinda olsaydi burada
-    gorunurdu" noktasi — kalibrasyonu otonomi RISKI OLMADAN gozle dogrulama araci)
+  * Canli MJPEG + YOLO overlay + KINEMATIK dogrulama katmani:
+      - macenta arti = MIKNATISIN YERE IZDUSUMU (FK'den hesaplanir — kol
+        inerse miknatis oraya iner; arti kupun ustundeyse model dogru)
+      - kupun HESAPLANAN dunya konumu (cm) sol ustte (cetvelle kontrol edilebilir)
   * 4 servo slider (kolu konumlamak icin — kontrolorun baslangic pozu buradan)
   * ▶ BASLAT / ⏹ DURDUR / 🛑 ACIL DUR (Esc) — acil dur: freeze + miknatis OFF
-  * ⏯ ADIM MODU: kontrolor otomatik tick atmaz; ⏭ TEK ADIM ile her tick'i
-    elinle ilerletirsin — her adimin karari logda
-  * Detayli log ekrani; ayrica her kosu pc/pickup_logs/run_*.jsonl dosyasina
-    TAM kayit yazar (debug'in tek dogru kaynagi)
-  * HIZA NOKTALARI + SEAT kalibrasyonu (v3'un ogretilen parcalari)
+  * ⏯ ADIM MODU + detayli log; her kosu pc/pickup_logs/run_*.jsonl'a TAM kayit
+  * KINEMATIK kalibrasyon paneli (olculer + 4 referans + odak)
 
-Kontrolor: pickup_controller.PickupController v3 (SONA KADAR KAMERA):
-  SEAT (bilek paralel aciya) -> PROBE (eklem yon/kazanc jog olcumu) ->
-  ALIGN (paralaks hedefiyle hizala + alcal dongusu) -> ENDGAME (son 2-4 cm
-  kor, miknatis erken acik, buton sonlandirir) -> GRABBED.
+Kontrolor: pickup_controller.PickupController v4 (GERCEK KINEMATIK):
+  AIM (kup dunya konumu olculur, IK ile hover pozu hesaplanir, dogrulanir) ->
+  DESCEND (tip_z cm cm dusurulur, IK her adimda; miknatis 2 cm'de ACIK;
+  buton sonlandirir) -> GRABBED.
 
-KALIBRASYON SIRASI (bir kez):
+KALIBRASYON SIRASI (bir kez, ~5 dk):
   1) arm_sim sinir sihirbazi (guvenli zarf)
-  2) SEAT noktalari (>=3): kolu farkli (sh, el) pozlara getir, bilegi miknatis
-     yuzu yere TAM PARALEL olana kadar cevir, "SEAT noktasi ekle"
-  3) HIZA noktalari (>=1 TEMAS + 2-4 yukseklik): kup MIKNATISIN TAM ALTINDA
-     dururken — once degdir (buton basili, temas ornegi), sonra ~2/5/9 cm
-     yukseklikte (once 🪑 seat butonu!) "HIZA noktasi ekle". Canli macenta
-     artiyla dogrula: kup altta iken arti her yukseklikte kup merkezine
-     oturmali. 💾 Config Kaydet.
+  2) OLCULER (cetvel, cm): L1 omuz->dirsek, L2 dirsek->bilek, L3 bilek->miknatis
+     ucu, H0 omuz yerden, R0 omuz-base yatay ofset, kup kenari -> 💾 Olculeri kaydet
+  3) REFERANSLAR (kolu tarif edilen duruma getir, butona bas):
+     📐 L1 DIK (omuz uzvu dik yukari) / 📐 KOL DUZ (L2, L1 dogrultusunda) /
+     📐 MIKNATIS ASAGI (miknatis yuzu tam asagi) / 📐 BASE ILERI (tam karsi)
+  4) ODAK: kupu kameradan olculen mesafeye koy (orn. 20 cm), 🎯 Odak kalibre
+  5) DOGRULAMA: macenta arti gercekten miknatisin altindaki noktada mi; kup
+     koyunca yazilan (x, y) cm cetvelle tutuyor mu. 💾 Config Kaydet.
 
 Calistir:  & ".venv\\Scripts\\python.exe" pc\\pickup_test.py
 """
@@ -47,8 +46,9 @@ import customtkinter as ctk
 import cv2
 from PIL import Image
 
+from arm_kinematics import ArmModel, DEFAULTS as KIN_DEFAULTS, point_from_height
 from detector import get_detector
-from pickup_controller import PickupController, interp_target, seat_deg
+from pickup_controller import PickupController
 from stream_reader import StreamReader
 
 PICKUP_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickup_config.json")
@@ -103,19 +103,10 @@ class PickupTest(ctk.CTk):
         env = auto.get("safe_envelope") or {}
         self.log("✅ güvenli bölge kayıtlı" if env.get("sh_grid")
                  else "⚠ güvenli bölge YOK — önce arm_sim sihirbazı")
-        ns = len(auto.get("seat_points") or [])
-        self.log(f"✅ SEAT: {ns} nokta" if ns >= 3
-                 else f"⚠ SEAT noktası {ns}/3 — bileği paralel yapıp 'SEAT noktası ekle'")
-        ap = auto.get("align_points") or []
-        nc = sum(1 for p in ap if p.get("contact"))
-        self.log(f"✅ HİZA: {len(ap)} nokta ({nc} temas)" if ap and nc
-                 else "⚠ HİZA noktası YOK/temassız — küp mıknatıs altındayken "
-                      "farklı yüksekliklerde 'HİZA noktası ekle' (biri buton basılı)")
-        if ap and nc == len(ap) and len(ap) > 1:
-            self.log("⚠ TÜM hiza örnekleri 'temas' işaretli — kalibrasyon "
-                     "muhtemelen YANLIŞ alındı. 🗑 silip yeniden yap: küp hep "
-                     "YERDE durur, kol yükseltilir; buton YALNIZ en alçak "
-                     "(değme) örneğinde basılı olur.")
+        miss = ArmModel(auto.get("kinematics") or {}).missing()
+        self.log("✅ kinematik kalibrasyon hazır" if not miss
+                 else "⚠ KİNEMATİK eksik: " + ", ".join(miss) +
+                      " — ölçüleri gir + 📐 referansları yakala")
 
     # ------------------------------------------------------------------ cfg
     def _load_cfg(self) -> dict:
@@ -211,35 +202,17 @@ class PickupTest(ctk.CTk):
         ctk.CTkButton(prow, text="📍 Bu pozu kaydet", fg_color="#46a", width=110,
                       command=self._save_search).pack(side="left", padx=(2, 0))
 
-        # SOL: ayarlar
-        ctk.CTkLabel(left, text="AYAR", font=("", 13, "bold")).pack(anchor="w",
-                                                                    pady=(10, 2))
-        self.bdir_btn = ctk.CTkButton(left, text="", fg_color="#46a",
-                                      command=lambda: self._flip_dir("base_dir"))
-        self.bdir_btn.pack(fill="x", pady=2)
-        self._refresh_dir_btns()
-
-        # SOL: SEAT + HIZA NOKTALARI kalibrasyonu (v3'un ogretilen parcalari)
-        ctk.CTkLabel(left, text="SEAT & HİZA NOKTALARI (paralaks)",
+        # SOL: KINEMATIK KALIBRASYON — adim adim SIHIRBAZ (tek dugme)
+        ctk.CTkLabel(left, text="KİNEMATİK KALİBRASYON",
                      font=("", 13, "bold")).pack(anchor="w", pady=(10, 2))
-        ctk.CTkButton(left, text="🪑 Bileği SEAT açısına getir", fg_color="#3a7",
-                      command=self._goto_seat).pack(fill="x", pady=2)
-        strow = ctk.CTkFrame(left, fg_color="transparent")
-        strow.pack(fill="x", pady=2)
-        self.seat_btn = ctk.CTkButton(strow, text="", fg_color="#46a",
-                                      command=self._add_seat)
-        self.seat_btn.pack(side="left", expand=True, fill="x", padx=(0, 2))
-        ctk.CTkButton(strow, text="🗑", fg_color="#a33", width=36,
-                      command=self._clear_seat).pack(side="left", padx=(2, 0))
-        self._refresh_seat_btn()
-        alrow = ctk.CTkFrame(left, fg_color="transparent")
-        alrow.pack(fill="x", pady=2)
-        self.align_btn = ctk.CTkButton(alrow, text="", fg_color="#a63",
-                                       command=self._add_align)
-        self.align_btn.pack(side="left", expand=True, fill="x", padx=(0, 2))
-        ctk.CTkButton(alrow, text="🗑", fg_color="#a33", width=36,
-                      command=self._clear_align).pack(side="left", padx=(2, 0))
-        self._refresh_align_btn()
+        ctk.CTkButton(left, text="🧙 KALİBRASYON SİHİRBAZI", height=36,
+                      fg_color="#7a4fbf", hover_color="#623da0",
+                      command=self._open_wizard).pack(fill="x", pady=2)
+        self.kin_status = ctk.CTkLabel(left, text="", font=("", 11),
+                                       text_color="#ffd24a", justify="left",
+                                       wraplength=300)
+        self.kin_status.pack(anchor="w", pady=(2, 0))
+        self._refresh_kin_status()
         ctk.CTkButton(left, text="💾 Config Kaydet",
                       command=self._save_cfg).pack(fill="x", pady=2)
 
@@ -342,15 +315,6 @@ class PickupTest(ctk.CTk):
         auto = self.pickup_cfg.setdefault("autonomous", {})
         auto["search_pose"] = pose
         self.log(f"📍 arama pozu = {pose} (💾 Config Kaydet ile kalıcı olur)")
-        # v3 bilegi hemen seat'e cevirir — arama pozu seat'ten uzaksa kup SEAT
-        # gecisinde kadrajdan kacar (saha 09:37). Kaydederken uyar.
-        pts = auto.get("seat_points") or []
-        if len(pts) >= 3:
-            seat = round(seat_deg(pts, pose[1], pose[2]))
-            if abs(pose[3] - seat) > 8:
-                self.log(f"⚠ bu pozun bileği ({pose[3]}°) seat açısından ({seat}°) "
-                         f"uzak — önce 🪑 'Bileği SEAT açısına getir' deyip küpü "
-                         f"görüntüde tutarak kaydetmen önerilir.")
 
     # ------------------------------------------------------------------ log
     def log(self, msg: str):
@@ -383,8 +347,9 @@ class PickupTest(ctk.CTk):
             self.status.configure(text="durum: IDLE")
             return
         live = c.live or {}
-        extra = (f"\ndx={live.get('dx', '-')}  dy={live.get('dy', '-')}  "
-                 f"area={live.get('area', '-')}  conf={live.get('conf', '-')}")
+        extra = (f"\nküp=({live.get('x', '-')}, {live.get('y', '-')}) cm  "
+                 f"h={live.get('h', '-')} cm  px=({live.get('u', '-')}, "
+                 f"{live.get('v', '-')})")
         self.status.configure(text=f"durum: {c.state}\n{c.message}{extra}")
 
     def _arm_http_get(self, _agv: str, path: str):
@@ -495,8 +460,7 @@ class PickupTest(ctk.CTk):
         fresh = self._load_cfg()
         auto = fresh.setdefault("autonomous", {})
         ui = self.pickup_cfg.get("autonomous", {}) or {}
-        for k in ("base_dir", "search_pose", "align_points", "seat_points",
-                  "probe", "align", "endgame"):
+        for k in ("search_pose", "kinematics"):
             if k in ui:
                 auto[k] = ui[k]
         self.pickup_cfg = fresh
@@ -577,30 +541,31 @@ class PickupTest(ctk.CTk):
             else:
                 self.detection_state.pop(AGV, None)
             frame = det.draw(frame, dets)
-        # PARALAKS HEDEF OVERLAY: kayitli hiza orneklerinin hedefleri kucuk
-        # noktalar; tespit varsa ANLIK bbox yuksekligiyle interpole edilen
-        # HAREKETLI macenta arti — "kup miknatisin altinda olsaydi burada
-        # gorunurdu". Kalibrasyonu otonomi olmadan gozle dogrulama araci:
-        # kup miknatisin altindayken arti her yukseklikte kup merkezine oturmali.
+        # KINEMATIK OVERLAY — kalibrasyonu otonomi olmadan gozle dogrulama:
+        #  * macenta arti = MIKNATISIN YERE IZDUSUMU (FK + projeksiyon): kol
+        #    inerse miknatis buraya iner. Arti kupun ustundeyse model dogru.
+        #  * tespit varsa sol ust koseye kupun HESAPLANAN dunya konumu (cm)
+        #    yazilir (isin-zemin kesisimi) — cetvelle kontrol edilebilir.
         h, w = frame.shape[:2]
-        aln = auto.get("align", {}) or {}
-        dbx = int(aln.get("deadband_x_px", 12))
-        dby = int(aln.get("deadband_y_px", 12))
-        pts = auto.get("align_points") or []
-        for p in pts:
-            try:
-                px = int(w * float(p["col"]))
-                py = int(h * float(p["row"]))
-            except Exception:
-                continue
-            color = (0, 215, 255) if p.get("contact") else (200, 120, 255)
-            cv2.circle(frame, (px, py), 3, color, -1)
-        if best is not None and pts:
-            tx, ty = interp_target(pts, float(best.height))
-            cx, cy = int(w * tx), int(h * ty)
-            cv2.drawMarker(frame, (cx, cy), (255, 0, 255), cv2.MARKER_CROSS, 18, 2)
-            cv2.rectangle(frame, (cx - dbx, cy - dby), (cx + dbx, cy + dby),
-                          (130, 60, 130), 1)
+        model = ArmModel(auto.get("kinematics") or {})
+        if not model.missing():
+            servos = [self.arm_servo_vars[AGV][i].get() for i in range(4)]
+            st = self.arm_state.get(AGV) or {}
+            if st.get("targets"):
+                servos = st["targets"]
+            cube_cm = float(model.c.get("cube_cm") or 4.0)   # type: ignore[arg-type]
+            mx, my, _mz = model.magnet_world(servos)
+            pj = model.project_point(servos, mx, my, cube_cm)
+            if pj is not None and 0 <= pj[0] < w and 0 <= pj[1] < h:
+                cv2.drawMarker(frame, (int(pj[0]), int(pj[1])), (255, 0, 255),
+                               cv2.MARKER_CROSS, 18, 2)
+            if best is not None:
+                est = model.cube_from_pixel(servos, best.cx, best.cy,
+                                            z_plane=cube_cm / 2.0)
+                if est is not None:
+                    cv2.putText(frame, f"kup=({est[0]:.1f},{est[1]:.1f})cm",
+                                (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                (255, 0, 255), 1, cv2.LINE_AA)
 
         img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(img)
@@ -611,21 +576,138 @@ class PickupTest(ctk.CTk):
         self.video.configure(image=self._img_ref, text="")
         self._pickup_ui_refresh()
 
-    def _dir_val(self, key: str) -> int:
-        auto = self.pickup_cfg.get("autonomous", {}) or {}
-        return int(auto.get(key, PickupController.DEFAULTS[key]))
+    # ------------------------------------------------------------------ kinematik
+    def _kin(self) -> dict:
+        return {**KIN_DEFAULTS,
+                **((self.pickup_cfg.get("autonomous", {}) or {})
+                   .get("kinematics") or {})}
 
-    def _flip_dir(self, key: str):
-        """Eksen yonunu cevir — calisan kontrolore de ANINDA uygulanir."""
-        val = -self._dir_val(key)
-        self.pickup_cfg.setdefault("autonomous", {})[key] = val
-        if self.pc is not None:
-            self.pc._cfg[key] = val
-        self._refresh_dir_btns()
-        self.log(f"↔ {key} = {val:+d} olarak çevrildi (💾 ile kalıcı olur)")
+    def _open_wizard(self):
+        if getattr(self, "_wizard", None) is not None:
+            try:
+                self._wizard.focus()
+                return
+            except Exception:
+                self._wizard = None
+        self._wizard = CalibWizard(self)
 
-    def _refresh_dir_btns(self):
-        self.bdir_btn.configure(text=f"↔ base_dir: {self._dir_val('base_dir'):+d}")
+    # kind -> (pts anahtari, servo index, sabit aci | None=hesaplanir, aciklama)
+    REF_KINDS = {
+        "sh90": ("sh_pts", 1, 90.0, "L1 tam DİK yukarı"),
+        "sh0":  ("sh_pts", 1, 0.0, "L1 tam YATAY ileri"),
+        "el0":  ("el_pts", 2, None, "kol DÜZ (L2, L1 doğrultusunda)"),
+        "elh":  ("el_pts", 2, None, "L2 tam YATAY (L1 nerede olursa)"),
+        "grd":  ("gr_pts", 3, None, "mıknatıs yüzü TAM AŞAĞI"),
+        "grf":  ("gr_pts", 3, None, "mıknatıs ucu TAM İLERİ (yüz dik)"),
+        "b0":   ("base_pts", 0, 0.0, "base tam İLERİ"),
+        "b90":  ("base_pts", 0, 90.0, "base tam SAĞA dönük (90°)"),
+    }
+
+    def _add_ref_point(self, key: str, servo: float, angle: float, desc: str):
+        """[servo, aci] noktasini ekle/yenile (ayni servoda ±2 -> guncelle)."""
+        kin = (self.pickup_cfg.setdefault("autonomous", {})
+               .setdefault("kinematics", {}))
+        pts = kin.setdefault(key, [])
+        for i, p in enumerate(pts):
+            if abs(float(p[0]) - servo) <= 2:
+                pts[i] = [servo, angle]
+                break
+        else:
+            pts.append([servo, angle])
+        self.log(f"📐 {desc}: servo={servo:g} → açı={angle:g}° "
+                 f"({key} {len(pts)} nokta; 💾 ile kalıcı)")
+        self._refresh_kin_status()
+
+    def _capture_ref(self, kind: str):
+        """Referans NOKTASI yakala: kolu tarif edilen fiziksel durusa getir,
+        bas — [servo, aci] cifti eklenir. Servo birimi derece OLMADIGI icin
+        her eklemde EN AZ IKI nokta gerekir (egim). Hesaplanan acilar onceki
+        fitlere dayanir — sira: L1 -> dirsek -> bilek. Paralelkenar kolda
+        (el_abs) dirsek noktalari MUTLAK on kol acisi tutar."""
+        key, idx, angle, desc = self.REF_KINDS[kind]
+        val = self.arm_servo_vars[AGV][idx].get()
+        m = ArmModel(self._kin())
+        el_abs = bool(self._kin().get("el_abs"))
+        if angle is None:
+            s1 = self.arm_servo_vars[AGV][1].get()
+            s2 = self.arm_servo_vars[AGV][2].get()
+            if kind in ("el0", "elh"):
+                # el0: beta_abs = alpha (kol duz) — elh: beta_abs = 0 (yatay)
+                need_alpha = (kind == "el0") or not el_abs
+                if need_alpha and m.maps["sh"] is None:
+                    self.log("⚠ Önce L1'in iki referansını kaydet.")
+                    return
+                alpha = m.alpha(s1) if m.maps["sh"] is not None else 0.0
+                babs = alpha if kind == "el0" else 0.0
+                angle = round(babs if el_abs else babs - alpha, 2)
+            else:   # grd / grf — beta_abs gerekli
+                if m.maps["sh"] is None or m.maps["el"] is None:
+                    self.log("⚠ Önce L1 ve dirsek referanslarını kaydet.")
+                    return
+                beta = m.beta_abs(s1, s2)
+                angle = round((-90.0 if kind == "grd" else 0.0) - beta, 2)
+        self._add_ref_point(key, val, angle, desc)
+
+    def _clear_refs(self):
+        kin = (self.pickup_cfg.setdefault("autonomous", {})
+               .setdefault("kinematics", {}))
+        for k in ("sh_pts", "el_pts", "gr_pts", "base_pts"):
+            kin[k] = []
+        self._refresh_kin_status()
+        self.log("🗑 tüm açı referansları silindi (💾 ile kalıcı olur)")
+
+    HEIGHT_HELP = {"sh": ("sh_pts", "DİRSEK mafsalı"),
+                   "el": ("el_pts", "BİLEK mafsalı"),
+                   "gr": ("gr_pts", "MIKNATIS UCU")}
+
+    def _capture_height_val(self, joint: str, z: float):
+        """YUKSEKLIKTEN referans (sihirbaz + ana panel ortak): kol su anki
+        pozundayken ilgili noktanin YERDEN yuksekligi z'den aci hesaplanir
+        (sin(aci)=dz/L). 'Kol tam yatay/dik olmuyor' problemini cozer.
+        Donus: (basari, mesaj)."""
+        key, what = self.HEIGHT_HELP[joint]
+        servos = [self.arm_servo_vars[AGV][i].get() for i in range(4)]
+        res = point_from_height(ArmModel(self._kin()), joint, servos, z)
+        if isinstance(res, str):
+            return False, res
+        servo, angle = res
+        self._add_ref_point(key, servo, angle, f"{what} {z:g} cm")
+        return True, f"{what} {z:g} cm → açı={angle:g}° (servo={servo:g})"
+
+    def _calib_focal_val(self, dist: float):
+        """Odak kalibrasyonu (ortak): kup OLCULEN mesafede + tespitliyken
+        cam_f = bh_px * mesafe / kup_kenari. Donus: (basari, mesaj)."""
+        d = self.detection_state.get(AGV)
+        if not d:
+            return False, "Önce küp tespit edilmeli (🎯 Tespit aç)"
+        kin = (self.pickup_cfg.setdefault("autonomous", {})
+               .setdefault("kinematics", {}))
+        cube = float(self._kin().get("cube_cm") or 4.0)
+        bh = float(d.get("h") or 0)
+        if bh <= 0 or dist <= 0:
+            return False, "geçersiz ölçüm (bh veya mesafe 0)"
+        kin["cam_f"] = round(bh * dist / cube, 1)
+        self._refresh_kin_status()
+        return True, (f"odak: bh={bh:.0f}px @ {dist:g}cm, küp {cube:g}cm → "
+                      f"cam_f={kin['cam_f']} px")
+
+    def _refresh_kin_status(self):
+        m = ArmModel(self._kin())
+        miss = m.missing()
+        fits = []
+        for j in ("sh", "el", "gr", "base"):
+            n = len(m.pts(j))
+            fit = m.maps[j]
+            fits.append(f"{j}:{n}" + (f"(k={fit[0]:.2f})" if fit else ""))
+        if miss:
+            self.kin_status.configure(
+                text="⚠ eksik: " + ", ".join(miss) + "\n" + "  ".join(fits),
+                text_color="#ffd24a")
+        else:
+            self.kin_status.configure(
+                text=("✅ hazır — " + "  ".join(fits)
+                      + f"  f={float(self._kin().get('cam_f') or 0):g}px"),
+                text_color="#7c7")
 
     def _set_led(self, val):
         """Flash LED parlakligi (0-255) — debounce: surukleme bitince SON deger
@@ -639,132 +721,6 @@ class PickupTest(ctk.CTk):
             except Exception:
                 pass
         self._led_after = self.after(120, lambda: self._http(f"/led?b={v}", log=True))
-
-    def _pose3(self) -> list:
-        return [self.arm_servo_vars[AGV][i].get() for i in (1, 2, 3)]
-
-    # ------------------------------------------------------------------ SEAT
-    def _goto_seat(self):
-        """Bilegi MEVCUT (sh, el) icin SEAT acisina (miknatis yuzu yere paralel)
-        getir — seat_points IDW interpolasyonu. Hiza noktasi almadan once ve
-        kalibrasyonu dogrularken kullanilir."""
-        if self.pc is not None and self.pc.active:
-            self.log("⚠ Sekans aktifken seat'e gidilmez — önce ⏹ DURDUR.")
-            return
-        auto = self.pickup_cfg.get("autonomous", {}) or {}
-        pts = auto.get("seat_points") or []
-        if len(pts) < 3:
-            self.log(f"⚠ SEAT noktası {len(pts)}/3 — önce bileği elle paralel "
-                     f"yapıp 'SEAT noktası ekle' ile öğret.")
-            return
-        sh, el, _ = self._pose3()
-        seat = max(0, min(180, round(seat_deg(pts, sh, el))))
-        self._set_servo(3, seat)
-        self.log(f"🪑 bilek seat açısına: sh={sh} el={el} → gripper {seat}°")
-
-    def _add_seat(self):
-        """SEAT NOKTASI EKLE: bilegi miknatis yuzu yere TAM PARALEL olana kadar
-        elle cevir, bas — [sh, el, gr] eklenir. Kontrolor calisma boyunca bilegi
-        bu noktalardan interpole edilen acida tutar (kamera pitch sabit =
-        paralaks modelinin on kosulu). Farkli (sh, el) bolgelerinden >=3 nokta."""
-        sh, el, gr = self._pose3()
-        pts = self.pickup_cfg.setdefault("autonomous", {}).setdefault("seat_points", [])
-        pts.append([sh, el, gr])
-        self._refresh_seat_btn()
-        self.log(f"📍 seat noktası eklendi: sh={sh} el={el} → gripper {gr}° "
-                 f"({len(pts)} nokta; 💾 ile kalıcı olur)")
-
-    def _clear_seat(self):
-        self.pickup_cfg.setdefault("autonomous", {})["seat_points"] = []
-        self._refresh_seat_btn()
-        self.log("🗑 seat noktaları silindi (💾 ile kalıcı olur)")
-
-    def _refresh_seat_btn(self):
-        n = len((self.pickup_cfg.get("autonomous", {}) or {}).get("seat_points") or [])
-        self.seat_btn.configure(text=f"📍 SEAT noktası ekle — {n} nokta")
-
-    # ------------------------------------------------------------------ HIZA
-    def _add_align(self):
-        """HIZA NOKTASI EKLE (paralaks kalibrasyonu): kup MIKNATISIN TAM
-        ALTINDA + bilek SEAT acisindayken bas — {bh, col, row, contact}
-        kaydedilir. contact=true: kup miknatisa degerken (buton basili).
-        Kontrolor calisma sirasinda anlik bbox yuksekligiyle bu noktalardan
-        hedef pikseli interpole eder. Ayni yukseklige (±%10 bh) ikinci ornek
-        eskisini DEGISTIRIR (yenileme)."""
-        d = self.detection_state.get(AGV)
-        if not d:
-            self.log("⚠ Önce küp tespit edilmeli (🎯 aç + küp mıknatısın TAM altında)")
-            return
-        auto = self.pickup_cfg.setdefault("autonomous", {})
-        pts = auto.setdefault("align_points", [])
-        bh = float(d.get("h") or 0)
-        cx, cy = float(d["cx"]), float(d["cy"])
-        if bh <= 0:
-            self.log("⚠ bbox yüksekliği okunamadı")
-            return
-        # Kirpilma duzeltmesi (kontrolorle ayni mantik): alt/ust kenarda kesik
-        # kupte gercek boyut GENISLIKTEN, merkez gorunen kenardan kurulur.
-        H, m = d["frame_h"], 4
-        y1, y2 = float(d.get("y1", cy - bh / 2)), float(d.get("y2", cy + bh / 2))
-        clipped = False
-        if y2 >= H - m and y1 > m:        # alt kenar kesik
-            bh = float(d.get("w") or bh)
-            cy = y1 + bh / 2.0
-            clipped = True
-        elif y1 <= m and y2 < H - m:      # ust kenar kesik
-            bh = float(d.get("w") or bh)
-            cy = y2 - bh / 2.0
-            clipped = True
-        g = self.grip_state.get(AGV) or {}
-        contact = g.get("type") == "held"
-        # SAHA 09:45: kullanici 4 ornegin DORDUNU de temasta aldi (kupu
-        # miknatisa yapistirip kolla kaldirarak) -> paralaks modeli coker.
-        # Dogru yontem: kup hep YERDE; yalniz en alcak orneukte buton basili.
-        if contact and any(p.get("contact")
-                           and abs(float(p.get("bh", 0)) - bh) > 0.10 * bh
-                           for p in pts):
-            self.log("⚠ İKİNCİ temas örneği — normalde 1 temas yeter! Yükseklik "
-                     "örnekleri küp YERDE ve buton SERBESTKEN alınmalı; küpü "
-                     "mıknatısa yapıştırıp kolu kaldırarak örnek almak paralaks "
-                     "kalibrasyonunu BOZAR.")
-        rec = {"bh": round(bh, 1),
-               "col": round(cx / d["frame_w"], 3),
-               "row": round(cy / H, 3),
-               "pose": self._pose3(), "contact": contact,
-               "ts": time.strftime("%Y-%m-%d %H:%M")}
-        if clipped:
-            self.log("⚠ bbox kadraj kenarında kırpıktı — boyut genişlikten, "
-                     "merkez görünen kenardan düzeltildi (mümkünse küp TAM "
-                     "görünürken örnek almak daha sağlıklı)")
-        for i, p in enumerate(pts):
-            if abs(float(p.get("bh", 0)) - bh) <= 0.10 * bh:
-                pts[i] = rec
-                self._refresh_align_btn()
-                self.log(f"📍 hiza noktası YENİLENDİ (bh≈{bh:.0f}px): "
-                         f"({rec['col']:.2f}, {rec['row']:.2f})"
-                         f"{' TEMAS ✔' if contact else ''} (💾 ile kalıcı)")
-                return
-        pts.append(rec)
-        self._refresh_align_btn()
-        tip = " TEMAS ✔ (buton basılı)" if contact else \
-              " — temas örneği için küpü mıknatısa değdirip tekrar ekle"
-        self.log(f"📍 hiza noktası {len(pts)}: bh={bh:.0f}px hedef "
-                 f"({rec['col']:.2f}, {rec['row']:.2f}){tip} (💾 ile kalıcı)")
-
-    def _clear_align(self):
-        self.pickup_cfg.setdefault("autonomous", {})["align_points"] = []
-        self._refresh_align_btn()
-        self.log("🗑 hiza noktaları silindi (💾 ile kalıcı olur)")
-
-    def _refresh_align_btn(self):
-        pts = (self.pickup_cfg.get("autonomous", {}) or {}).get("align_points") or []
-        nc = sum(1 for p in pts if p.get("contact"))
-        rng = ""
-        if pts:
-            bhs = sorted(float(p.get("bh", 0)) for p in pts)
-            rng = f", bh {bhs[0]:.0f}..{bhs[-1]:.0f}"
-        self.align_btn.configure(
-            text=f"📍 HİZA noktası ekle — {len(pts)} nokta ({nc} temas{rng})")
 
     # ------------------------------------------------------------------ dataset
     def _capture_shot(self):
@@ -792,6 +748,394 @@ class PickupTest(ctk.CTk):
         except Exception:
             pass
         self.destroy()
+
+
+class CalibWizard(ctk.CTkToplevel):
+    """Adim adim KINEMATIK kalibrasyon sihirbazi.
+
+    NON-MODAL: ana penceredeki servo slider'lari acik kalir — kullanici kolu
+    her adimda elle konumlar, sihirbaz o anki servo degerini okuyup referans
+    cifti uretir. Her adim TEK is anlatir, dogrular ve ilerlemeye izin verir.
+
+    Servo birimi DERECE DEGIL (PWM + mekanik) -> her eklem icin IKI fiziksel
+    durus yakalanir, aci = k*servo + b uydurmasiyla cikar. Aci hesaplanan
+    duruslar (L2 yatay, mik. asagi...) onceki eklemlerin fitine dayanir; bu
+    yuzden SIRA: olculer -> kol tipi -> L1 -> dirsek -> bilek -> base -> odak."""
+
+    def __init__(self, app: "PickupTest"):
+        super().__init__(app)
+        self.app = app
+        self.title("🧙 Kinematik Kalibrasyon Sihirbazı")
+        self.geometry("560x600")
+        self.transient(app)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.i = 0
+        self.steps = [
+            self._s_intro, self._s_measures, self._s_armtype,
+            self._s_l1, self._s_elbow, self._s_wrist, self._s_base,
+            self._s_focal, self._s_verify,
+        ]
+        self.meas_entries: dict = {}
+        self.h_entry: ctk.CTkEntry | None = None
+        self.f_entry: ctk.CTkEntry | None = None
+
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(10, 0))
+        self.step_lbl = ctk.CTkLabel(head, text="", font=("", 13, "bold"),
+                                     text_color="#b89cff")
+        self.step_lbl.pack(side="left")
+        self.live_lbl = ctk.CTkLabel(head, text="", font=("Consolas", 11),
+                                     text_color="#8c8")
+        self.live_lbl.pack(side="right")
+
+        self.body = ctk.CTkScrollableFrame(self, fg_color="#1a1a1a")
+        self.body.pack(fill="both", expand=True, padx=12, pady=8)
+
+        nav = ctk.CTkFrame(self, fg_color="transparent")
+        nav.pack(fill="x", padx=12, pady=(0, 10))
+        self.back_btn = ctk.CTkButton(nav, text="← Geri", width=90,
+                                      fg_color="#555", command=self._back)
+        self.back_btn.pack(side="left")
+        self.status = ctk.CTkLabel(nav, text="", font=("", 11), wraplength=300)
+        self.status.pack(side="left", padx=10)
+        self.next_btn = ctk.CTkButton(nav, text="İleri →", width=110,
+                                      fg_color="#3fbf66", command=self._next)
+        self.next_btn.pack(side="right")
+
+        self._tick()
+        self._render()
+
+    # ---------------------------------------------------------------- yardim
+    def _kin(self) -> dict:
+        return (self.app.pickup_cfg.setdefault("autonomous", {})
+                .setdefault("kinematics", {}))
+
+    def _model(self) -> ArmModel:
+        return ArmModel(self.app._kin())
+
+    def _servos(self) -> list:
+        return [self.app.arm_servo_vars[AGV][i].get() for i in range(4)]
+
+    def _tick(self):
+        """Canli servo okuma — kol nerede oldugunu hep gosterir."""
+        try:
+            s = self._servos()
+            st = self.app.arm_state.get(AGV) or {}
+            real = st.get("servos")
+            txt = f"servo: {s}"
+            if real:
+                txt += f"\nkol:   {list(real)}"
+            self.live_lbl.configure(text=txt)
+        except Exception:
+            pass
+        self._after = self.after(200, self._tick)
+
+    def _clear_body(self):
+        for w in self.body.winfo_children():
+            w.destroy()
+
+    def _para(self, text, color="#ccc", size=12, pad=(0, 4)):
+        ctk.CTkLabel(self.body, text=text, justify="left", wraplength=500,
+                     font=("", size), text_color=color).pack(anchor="w", pady=pad)
+
+    def _joint_ready(self, key: str) -> bool:
+        pts = self._kin().get(key) or []
+        if len(pts) < 2:
+            return False
+        sp = max(float(p[0]) for p in pts) - min(float(p[0]) for p in pts)
+        return sp >= 15.0
+
+    # ---------------------------------------------------------------- akis
+    def _render(self):
+        self._clear_body()
+        self.step_lbl.configure(text=f"Adım {self.i + 1}/{len(self.steps)}")
+        self.back_btn.configure(state="normal" if self.i > 0 else "disabled")
+        ready, hint = self.steps[self.i]()
+        self.status.configure(text=hint or "",
+                              text_color="#7c7" if ready else "#ffd24a")
+        last = self.i == len(self.steps) - 1
+        self.next_btn.configure(
+            text="✅ Bitir & Kaydet" if last else "İleri →",
+            state="normal" if ready else "disabled",
+            fg_color="#3fbf66" if ready else "#444")
+
+    def _next(self):
+        if self.i < len(self.steps) - 1:
+            self.i += 1
+            self._render()
+        else:
+            self.app._save_cfg()
+            self.app._refresh_kin_status()
+            self.app.log("✅ kalibrasyon sihirbazı tamamlandı + kaydedildi")
+            self._close()
+
+    def _back(self):
+        if self.i > 0:
+            self.i -= 1
+            self._render()
+
+    def _close(self):
+        try:
+            self.after_cancel(self._after)
+        except Exception:
+            pass
+        self.app._wizard = None
+        self.destroy()
+
+    def _cap_btn(self, parent, text, cmd):
+        ctk.CTkButton(parent, text=text, fg_color="#3a7", command=cmd
+                      ).pack(side="left", expand=True, fill="x", padx=2)
+
+    def _do(self, fn):
+        """Yakalama sarmalayici: calistir, sonucu durum satirina yaz, yeniden ciz."""
+        try:
+            r = fn()
+        except Exception as e:
+            r = (False, str(e))
+        if isinstance(r, tuple):
+            ok, msg = r
+            self.app.log(("✔ " if ok else "⚠ ") + msg)
+        self._render()
+
+    # ---------------------------------------------------------------- adimlar
+    def _s_intro(self):
+        self._para("Bu sihirbaz kolu FİZİKSEL olarak modeller: cetvelle ölçüp "
+                   "birkaç duruş yakalarsın, gerisini matematik hesaplar.",
+                   "#fff", 13)
+        self._para("\nÖnemli: servo değeri (0–180) GERÇEK AÇI DEĞİLDİR. Bu yüzden "
+                   "her eklem için İKİ bilinen duruş yakalarız; aradaki doğru "
+                   "her servo komutunu gerçek açıya çevirir.")
+        self._para("\nHazırlık: ana pencerede 📡 Yayın + 🎯 Tespit açık olsun "
+                   "(odak adımı küpü görmen gerekir). Kolu slider'larla "
+                   "konumlandıracaksın — bu pencere açık kalır.", "#8af")
+        self._para("\nSüre ~5 dk. İstediğin adıma Geri/İleri ile dönebilirsin.",
+                   "#999")
+        return True, "Başlamak için İleri'ye bas"
+
+    def _s_measures(self):
+        self._para("1) ÖLÇÜLER — cetvelle ölç, cm gir:", "#fff", 13)
+        defs = [
+            ("L1", "omuz mafsalı → dirsek mafsalı"),
+            ("L2", "dirsek mafsalı → bilek mafsalı"),
+            ("L3", "bilek mafsalı → MIKNATIS UCU (buton yüzeyi)"),
+            ("H0", "omuz mafsalı → ZEMİN (küplerin durduğu yüzey!) dikey"),
+            ("R0", "omuz mafsalı → base dönme ekseni yatay (üstten bak)"),
+            ("cube_cm", "küp kenarı"),
+        ]
+        kin = self._kin()
+        self.meas_entries = {}
+        for k, desc in defs:
+            row = ctk.CTkFrame(self.body, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkLabel(row, text="küp" if k == "cube_cm" else k,
+                         width=42, anchor="w").pack(side="left")
+            e = ctk.CTkEntry(row, width=64)
+            v = kin.get(k, self.app._kin().get(k, ""))
+            e.insert(0, "" if v in (None, "") else f"{float(v):g}")
+            e.pack(side="left", padx=(0, 8))
+            e.bind("<KeyRelease>", lambda _e: self._save_measures())
+            ctk.CTkLabel(row, text=desc, anchor="w", font=("", 11),
+                         text_color="#999").pack(side="left")
+            self.meas_entries[k] = e
+        m = self.app._kin()
+        need = [k for k in ("L1", "L2", "L3", "H0")
+                if not (float(m.get(k) or 0) > 0)]
+        ok = not need
+        return ok, ("kaydedildi ✔" if ok
+                    else "gerekli (>0): " + ", ".join(need))
+
+    def _save_measures(self):
+        kin = self._kin()
+        for k, e in self.meas_entries.items():
+            try:
+                kin[k] = float(e.get().replace(",", "."))
+            except Exception:
+                kin.pop(k, None)
+        self.app._refresh_kin_status()
+        # nav durumunu guncelle (yeniden cizmeden — entry odagi kacmasin)
+        m = self.app._kin()
+        ok = all(float(m.get(k) or 0) > 0 for k in ("L1", "L2", "L3", "H0"))
+        self.status.configure(text="kaydedildi ✔" if ok else "L1,L2,L3,H0 > 0 olmalı",
+                              text_color="#7c7" if ok else "#ffd24a")
+        self.next_btn.configure(state="normal" if ok else "disabled",
+                                fg_color="#3fbf66" if ok else "#444")
+
+    def _s_armtype(self):
+        self._para("2) KOL TİPİ — bu testi yap:", "#fff", 13)
+        self._para("\nSADECE shoulder slider'ını oynat (dirsek/bilek'e dokunma). "
+                   "Ön kola (L2) bak:")
+        self._para("• Ön kolun yere göre EĞİMİ değişmiyorsa → PARALELKENAR kol\n"
+                   "• Ön kol shoulder ile birlikte dönüyorsa → KLASİK kol", "#8af")
+        cur = bool(self._kin().get("el_abs"))
+        self._para(f"\nŞu an: {'PARALELKENAR' if cur else 'KLASİK'}", "#fc6")
+        row = ctk.CTkFrame(self.body, fg_color="transparent")
+        row.pack(fill="x", pady=6)
+
+        def setp(v):
+            self._kin()["el_abs"] = v
+            self.app.log(f"kol tipi: {'paralelkenar' if v else 'klasik'}")
+            self._render()
+        ctk.CTkButton(row, text="Klasik kol", fg_color="#46a" if not cur else "#3a7",
+                      command=lambda: setp(False)).pack(side="left", expand=True,
+                                                        fill="x", padx=2)
+        ctk.CTkButton(row, text="Paralelkenar", fg_color="#46a" if cur else "#3a7",
+                      command=lambda: setp(True)).pack(side="left", expand=True,
+                                                       fill="x", padx=2)
+        return True, "tipi seç (emin değilsen Klasik)"
+
+    def _joint_step(self, title, key, joint, angle_btns, height_label):
+        """Ortak 2-nokta eklem adimi: aci-poz butonlari + yukseklikten yakalama."""
+        self._para(title, "#fff", 13)
+        self._para("Kolu tarif edilen duruşa getir (slider) ve yakala. İKİ farklı "
+                   "duruş gerekli (servo değerleri ≥15 birim ayrık olmalı).")
+        # aci-poz butonlari
+        if angle_btns:
+            self._para("\nDuruşu tutturabiliyorsan:", "#8af", 11)
+            row = ctk.CTkFrame(self.body, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            for kind, label in angle_btns:
+                self._cap_btn(row, label,
+                              lambda k=kind: self._do(lambda: self._cap_ref(k)))
+        # yukseklikten
+        if height_label:
+            self._para(f"\nVeya {height_label}: kol herhangi bir duruşta dururken "
+                       "o noktanın YERDEN yüksekliğini ölç (cm), yaz, yakala — "
+                       "açı hesaplanır ('yatay olmuyor' sorununu çözer):", "#8af", 11)
+            row = ctk.CTkFrame(self.body, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            self.h_entry = ctk.CTkEntry(row, width=70)
+            self.h_entry.pack(side="left", padx=(0, 6))
+            self._cap_btn(row, "📏 yükseklikten yakala",
+                          lambda: self._do(self._cap_height(joint)))
+        # mevcut noktalar
+        pts = self._kin().get(key) or []
+        txt = " / ".join(f"s{p[0]:g}={p[1]:g}°" for p in pts) or "—"
+        self._para(f"\nYakalanan: {len(pts)} nokta:  {txt}", "#9c9", 11)
+        if pts:
+            ctk.CTkButton(self.body, text="🗑 bu eklemi sıfırla", fg_color="#a33",
+                          width=140,
+                          command=lambda: self._do(lambda: self._clr(key))
+                          ).pack(anchor="w", pady=2)
+        ready = self._joint_ready(key)
+        return ready, ("tamam ✔" if ready else
+                       "2 ayrık nokta gerekli" if len(pts) < 2
+                       else "noktalar çok yakın — daha ayrık 2. duruş")
+
+    def _cap_ref(self, kind):
+        before = len(self._kin().get(self.app.REF_KINDS[kind][0]) or [])
+        self.app._capture_ref(kind)
+        key = self.app.REF_KINDS[kind][0]
+        after = len(self._kin().get(key) or [])
+        return (after > before or True), f"{kind} yakalandı"
+
+    def _cap_height(self, joint):
+        def fn():
+            try:
+                z = float((self.h_entry.get() if self.h_entry else "")
+                          .replace(",", "."))
+            except Exception:
+                return False, "yükseklik sayı değil (cm)"
+            return self.app._capture_height_val(joint, z)
+        return fn
+
+    def _clr(self, key):
+        self._kin()[key] = []
+        self.app._refresh_kin_status()
+        return True, f"{key} sıfırlandı"
+
+    def _s_l1(self):
+        return self._joint_step(
+            "3) OMUZ (L1) — 2 nokta", "sh_pts", "sh",
+            [("sh90", "📐 L1 DİK (90°)"), ("sh0", "📐 L1 YATAY (0°)")],
+            "DİRSEK mafsalı yüksekliği")
+
+    def _s_elbow(self):
+        return self._joint_step(
+            "4) DİRSEK — 2 nokta", "el_pts", "el",
+            [("el0", "📐 KOL DÜZ"), ("elh", "📐 L2 YATAY")],
+            "BİLEK mafsalı yüksekliği")
+
+    def _s_wrist(self):
+        return self._joint_step(
+            "5) BİLEK — 2 nokta (mıknatıs yönü)", "gr_pts", "gr",
+            [("grd", "📐 MIK. AŞAĞI"), ("grf", "📐 MIK. İLERİ")],
+            "MIKNATIS UCU yüksekliği")
+
+    def _s_base(self):
+        self._para("6) BASE — 2 nokta (yana dönüş)", "#fff", 13)
+        self._para("Base yatay döner; yükseklikten ölçülemez. İki belirgin "
+                   "duruşu tuttur:")
+        row = ctk.CTkFrame(self.body, fg_color="transparent")
+        row.pack(fill="x", pady=4)
+        self._cap_btn(row, "📐 BASE İLERİ (0°)",
+                      lambda: self._do(lambda: self._cap_ref("b0")))
+        self._cap_btn(row, "📐 BASE SAĞ (90°)",
+                      lambda: self._do(lambda: self._cap_ref("b90")))
+        pts = self._kin().get("base_pts") or []
+        txt = " / ".join(f"s{p[0]:g}={p[1]:g}°" for p in pts) or "—"
+        self._para(f"\nYakalanan: {len(pts)} nokta:  {txt}", "#9c9", 11)
+        if pts:
+            ctk.CTkButton(self.body, text="🗑 sıfırla", fg_color="#a33", width=100,
+                          command=lambda: self._do(lambda: self._clr("base_pts"))
+                          ).pack(anchor="w", pady=2)
+        ready = self._joint_ready("base_pts")
+        return ready, ("tamam ✔" if ready else "2 ayrık nokta gerekli")
+
+    def _s_focal(self):
+        self._para("7) ODAK (kamera) — küpün kaç piksel göründüğünü mesafeye "
+                   "bağlar:", "#fff", 13)
+        self._para("\nKüpü kameranın TAM karşısına, cetvelle ölçtüğün düz "
+                   "mesafeye koy. Tespit (yeşil kutu) küpü görüyor olmalı. "
+                   "Mesafeyi yaz, yakala.")
+        row = ctk.CTkFrame(self.body, fg_color="transparent")
+        row.pack(fill="x", pady=4)
+        ctk.CTkLabel(row, text="mesafe cm", width=70).pack(side="left")
+        self.f_entry = ctk.CTkEntry(row, width=70)
+        self.f_entry.insert(0, "20")
+        self.f_entry.pack(side="left", padx=(0, 6))
+        self._cap_btn(row, "🎯 odak yakala", lambda: self._do(self._cap_focal()))
+        f = self.app._kin().get("cam_f")
+        det = self.app.detection_state.get(AGV)
+        seen = "küp görülüyor ✔" if det else "⚠ küp tespit edilmiyor (🎯 Tespit aç)"
+        self._para(f"\ncam_f = {f:g} px   ({seen})",
+                   "#9c9" if det else "#fc6", 11)
+        return True, "odak kalibre edildi (atlanabilir, varsayılan ~370)"
+
+    def _cap_focal(self):
+        def fn():
+            try:
+                dist = float((self.f_entry.get() if self.f_entry else "")
+                             .replace(",", "."))
+            except Exception:
+                return False, "mesafe sayı değil"
+            return self.app._calib_focal_val(dist)
+        return fn
+
+    def _s_verify(self):
+        self._para("8) DOĞRULAMA", "#fff", 13)
+        miss = self._model().missing()
+        if miss:
+            self._para("\n⚠ Hâlâ eksik:\n• " + "\n• ".join(miss), "#fc6")
+            self._para("\nGeri dönüp tamamla.", "#999")
+            return False, "eksik kalibrasyon var"
+        self._para("\n✅ Model hazır! Şimdi GÖZLE doğrula:", "#7c7", 12)
+        self._para("\n1) Ana penceredeki videoda MACENTA ARTI = mıknatısın yere "
+                   "izdüşümü. Kolu gezdir — artı her zaman mıknatısın tam "
+                   "altındaki noktada durmalı.", "#8af")
+        self._para("2) Küp koy: sol üstte 'küp=(x,y)cm' yazar. Cetvelle ölç, "
+                   "tutuyor mu bak. ±1–2 cm iyidir.", "#8af")
+        self._para("\nTutmuyorsa: en çok H0 ve ilgili eklemin 2. noktasını "
+                   "kontrol et (geri dön, yenile).", "#999")
+        # canli kup tahmini
+        det = self.app.detection_state.get(AGV)
+        if det:
+            est = self._model().cube_from_pixel(
+                self._servos(), det["cx"], det["cy"],
+                z_plane=float(self.app._kin().get("cube_cm") or 4) / 2.0)
+            if est:
+                self._para(f"\nşu an küp ≈ ({est[0]:.1f}, {est[1]:.1f}) cm",
+                           "#9f9", 12)
+        return True, "Bitir & Kaydet ile tamamla"
 
 
 if __name__ == "__main__":
