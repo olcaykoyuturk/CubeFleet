@@ -46,6 +46,7 @@ int  armGetAngle(int servoId);              // mevcut (gercek) aci
 int  armGetTarget(int servoId);             // hedef aci
 void armMagnetOn();
 void armMagnetOff();
+void armMagnetUpdate();                      // loop'ta cagir, termal timeout korumasi
 bool armGetMagnetState();
 bool armGetGripSensor();                    // STABLE durum (debounce sonrasi)
 const char* armGripEventType();             // "held" | "lost" | "none"

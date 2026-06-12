@@ -158,6 +158,7 @@ void loop() {
     mjpegServerLoop();
     armUpdate();           // servo ramping adimi (her ~20 ms'de 2°)
     gripUpdate();          // grip sensoru debounce + edge logu
+    armMagnetUpdate();     // miknatis termal timeout korumasi (kupsuz auto-off)
 
     // FPS metrik takip — Serial yok, sadece sayac guncelle
     // (degerler /status endpoint'inden okunabilir).
