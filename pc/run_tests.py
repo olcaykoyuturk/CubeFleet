@@ -26,6 +26,7 @@ TEST_FILES = [
     ("wire_protocol", "test_wire_protocol.py"),   # setHop govde sozlesmesi
     ("pickup_v4",     "test_pickup_v4.py"),       # kapma v4 kinematik kapali dongu
     ("fleet_timed",   "test_fleet_timed.py"),     # zamanli gercek-dunya filo senaryolari
+    ("camera_sync",   "test_camera_sync.py"),     # camera<->camera2 birebir senkron
 ]
 
 

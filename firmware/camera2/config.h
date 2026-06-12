@@ -8,7 +8,7 @@
 // camera/ = AGV_1 (CAM_1, .50)  |  camera2/ = AGV_2 (CAM_2, .51).
 // Iki klasor KIMLIK (CAM_ID + CAM_IP_OCT_4) disinda birebir ayni tutulur —
 // test_camera_sync.py her calismada karsilastirip sapmayi yakalar.
-#define CAM_ID          "CAM_1"     // CAM_1 | CAM_2 | CAM_3 ...
+#define CAM_ID          "CAM_2"     // CAM_1 | CAM_2 | CAM_3 ...
 
 // ===== WiFi (AGV Server'in AP'ina baglan) =====
 #define WIFI_SSID       "AGV_SERVER"
@@ -16,7 +16,7 @@
 
 // Statik IP son okteti - her CAM icin farkli olmali (50, 51, 52...)
 // server: 192.168.4.1, AP DHCP havuzu 192.168.4.2-11
-#define CAM_IP_OCT_4    50
+#define CAM_IP_OCT_4    51
 
 // ===== Log Ring Buffer =====
 // PC tarafindan HTTP polling ile cekilen son N log girdisi tutulur.
