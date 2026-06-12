@@ -36,7 +36,6 @@ Calistir:  & ".venv\\Scripts\\python.exe" pc\\pickup_test.py
 from __future__ import annotations
 
 import json
-import math
 import os
 import queue
 import threading
@@ -265,21 +264,6 @@ class PickupTest(ctk.CTk):
                       ).pack(side="left", expand=True, fill="x", padx=1)
         ctk.CTkButton(left, text="↺ sıfırla", width=70, fg_color="#555",
                       command=self._trim_reset).pack(anchor="w", pady=1)
-        # KESIN kalibrasyon: miknatisi elle kup ORTASINA getir, kupun gercek
-        # (x,y)'sini gir, bas -> offset FK'dan tek seferde hesaplanir (nudge'a
-        # gerek kalmaz). Kutu-merkezi/montaj sapmasini birlikte yutar.
-        crow2 = ctk.CTkFrame(left, fg_color="transparent")
-        crow2.pack(fill="x", pady=1)
-        ctk.CTkLabel(crow2, text="küp x", width=36).pack(side="left")
-        self.trim_x = ctk.CTkEntry(crow2, width=46)
-        self.trim_x.insert(0, "0")
-        self.trim_x.pack(side="left", padx=(0, 4))
-        ctk.CTkLabel(crow2, text="y", width=12).pack(side="left")
-        self.trim_y = ctk.CTkEntry(crow2, width=46)
-        self.trim_y.pack(side="left", padx=(0, 4))
-        ctk.CTkButton(crow2, text="📍 Kalibre", fg_color="#a63", width=80,
-                      command=self._calib_trim).pack(side="left", expand=True,
-                                                     fill="x", padx=2)
         self._refresh_trim()
 
         self.status = ctk.CTkLabel(left, text="durum: IDLE", font=("", 12, "bold"),
@@ -298,44 +282,6 @@ class PickupTest(ctk.CTk):
         self._refresh_trim()
         self._save_cfg()
         self.log(f"🎯 {key} = {auto[key]:+g} cm")
-
-    def _calib_trim(self):
-        """KESIN merkez kalibrasyonu: miknatisi elle kup ORTASINA getir
-        (buton kupe basacak sekilde), kupun GERCEK (x,y)'sini gir, bas.
-        Offset = FK miknatis konumu − girilen gercek konum, kup yonunde
-        ileri/yan bilesenlerine ayrilip aim_trim olarak kaydedilir. Boylece
-        kontrolor hedeflerken bu kaymayi telafi eder; nudge'a gerek kalmaz."""
-        try:
-            tx = float(self.trim_x.get().replace(",", "."))
-            ty = float(self.trim_y.get().replace(",", "."))
-        except Exception:
-            self.log("⚠ küp x/y sayı değil (cm)")
-            return
-        if ty <= 0:
-            self.log("⚠ küp ileri (y) > 0 olmalı")
-            return
-        model = ArmModel(self._kin())
-        if model.missing():
-            self.log("⚠ kinematik kalibrasyon eksik")
-            return
-        servos = [self.arm_servo_vars[AGV][i].get() for i in range(4)]
-        mx, my, _mz = model.magnet_world(servos)
-        yaw = math.atan2(tx, ty)
-        fx, fy = math.sin(yaw), math.cos(yaw)      # kupe dogru (ileri)
-        lx, ly = math.cos(yaw), -math.sin(yaw)     # saga dik (lateral)
-        ex, ey = mx - tx, my - ty
-        tf = round(ex * fx + ey * fy, 2)
-        tl = round(ex * lx + ey * ly, 2)
-        auto = self.pickup_cfg.setdefault("autonomous", {})
-        auto["aim_trim_fwd"] = tf
-        auto["aim_trim_lat"] = tl
-        if self.pc is not None:
-            self.pc._cfg["aim_trim_fwd"] = tf
-            self.pc._cfg["aim_trim_lat"] = tl
-        self._refresh_trim()
-        self._save_cfg()
-        self.log(f"📍 merkez kalibre: mıknatıs FK=({mx:.1f},{my:.1f}) vs küp "
-                 f"({tx:g},{ty:g}) → trim ileri={tf:+g} yan={tl:+g} cm (json'a kaydedildi)")
 
     def _trim_reset(self):
         auto = self.pickup_cfg.setdefault("autonomous", {})
