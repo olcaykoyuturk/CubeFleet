@@ -19,9 +19,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PYTHON = sys.executable
 
 TEST_FILES = [
-    ("graph",        "test_graph.py"),
-    ("fleet_planner","test_fleet_planner.py"),
-    ("integration",  "test_integration.py"),
+    ("graph",         "test_graph.py"),
+    ("fleet_planner", "test_fleet_planner.py"),
+    ("integration",   "test_integration.py"),
+    ("waypoint_sync", "test_waypoint_sync.py"),   # PC<->firmware graf senkron
+    ("wire_protocol", "test_wire_protocol.py"),   # setHop govde sozlesmesi
+    ("pickup_v3",     "test_pickup_v3.py"),       # kapma v3 sentetik kapali dongu
 ]
 
 
