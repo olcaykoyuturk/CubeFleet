@@ -431,44 +431,8 @@ class AGVControlApp(ctk.CTk):
         self.heading_lbl = ctk.CTkLabel(cmd_frame, text="Yon: -", anchor="w")
         self.heading_lbl.pack(fill="x", padx=12, pady=(0, 6))
 
-        # --- PID + Hiz (eski PID sekmesi buraya sikistirildi) ---
-        ctk.CTkLabel(cmd_frame, text="PID + HIZ",
-                     font=self.font_h2).pack(pady=(6, 2))
-        pid_row = ctk.CTkFrame(cmd_frame, fg_color="transparent")
-        pid_row.pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(pid_row, text="Kp", width=22).grid(row=0, column=0, padx=(2, 1))
-        self.kp_var = ctk.StringVar(value="0.012")
-        ctk.CTkEntry(pid_row, textvariable=self.kp_var, width=60
-                     ).grid(row=0, column=1, padx=1)
-        ctk.CTkLabel(pid_row, text="Ki", width=22).grid(row=0, column=2, padx=(6, 1))
-        self.ki_var = ctk.StringVar(value="0.000")
-        ctk.CTkEntry(pid_row, textvariable=self.ki_var, width=60
-                     ).grid(row=0, column=3, padx=1)
-        ctk.CTkLabel(pid_row, text="Kd", width=22).grid(row=0, column=4, padx=(6, 1))
-        self.kd_var = ctk.StringVar(value="0.005")
-        ctk.CTkEntry(pid_row, textvariable=self.kd_var, width=60
-                     ).grid(row=0, column=5, padx=1)
-        ctk.CTkButton(cmd_frame, text="PID Uygula", height=26,
-                      command=self._cmd_set_pid).pack(fill="x", padx=12, pady=(2, 4))
-
-        speed_row = ctk.CTkFrame(cmd_frame, fg_color="transparent")
-        speed_row.pack(fill="x", padx=12, pady=(2, 2))
-        ctk.CTkLabel(speed_row, text="Hiz", width=24).pack(side="left")
-        self.speed_var = ctk.IntVar(value=35)
-        self.speed_slider = ctk.CTkSlider(
-            speed_row, from_=0, to=255, number_of_steps=255,
-            variable=self.speed_var,
-            command=lambda v: self.speed_lbl.configure(text=str(int(v))))
-        self.speed_slider.pack(side="left", fill="x", expand=True, padx=4)
-        self.speed_lbl = ctk.CTkLabel(speed_row, text="35", width=30)
-        self.speed_lbl.pack(side="left")
-        ctk.CTkButton(cmd_frame, text="Hiz Uygula", height=26,
-                      command=self._cmd_set_speed).pack(fill="x", padx=12, pady=(2, 4))
-
-        self.pid_status_lbl = ctk.CTkLabel(
-            cmd_frame, text="Aktif PID/hiz: -",
-            anchor="w", text_color=COL_MUTED, font=self.font_small)
-        self.pid_status_lbl.pack(fill="x", padx=12, pady=(2, 8))
+        # (PID + Hiz kontrolleri Sensors sekmesine tasindi — kalibrasyon
+        # panelinin altinda; _build_pid_panel)
 
         # Alt: telemetri
         tel_frame = ctk.CTkFrame(nav)
@@ -958,11 +922,57 @@ class AGVControlApp(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
     # ---------- Sensors sekmesi (preset + scrollable sensör log) ----------
+    def _build_pid_panel(self, parent):
+        """PID + HIZ ayarlari (Sensors sekmesi, kalibrasyon panelinin altinda).
+        Operations'tan tasindi — widget adlari ayni kaldi (kp_var, speed_var,
+        pid_status_lbl...), _cmd_set_pid/_cmd_set_speed ve durum guncellemeleri
+        degismeden calisir. Aktif AGV'ye uygulanir."""
+        ctk.CTkLabel(parent, text="PID + HIZ (aktif AGV)",
+                     font=self.font_h2).pack(pady=(8, 2))
+
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(2, 4))
+        # PID girisleri + uygula (tek satir)
+        ctk.CTkLabel(row, text="Kp", width=22).pack(side="left", padx=(2, 1))
+        self.kp_var = ctk.StringVar(value="0.012")
+        ctk.CTkEntry(row, textvariable=self.kp_var, width=60
+                     ).pack(side="left", padx=1)
+        ctk.CTkLabel(row, text="Ki", width=22).pack(side="left", padx=(6, 1))
+        self.ki_var = ctk.StringVar(value="0.000")
+        ctk.CTkEntry(row, textvariable=self.ki_var, width=60
+                     ).pack(side="left", padx=1)
+        ctk.CTkLabel(row, text="Kd", width=22).pack(side="left", padx=(6, 1))
+        self.kd_var = ctk.StringVar(value="0.005")
+        ctk.CTkEntry(row, textvariable=self.kd_var, width=60
+                     ).pack(side="left", padx=1)
+        ctk.CTkButton(row, text="PID Uygula", height=26, width=110,
+                      command=self._cmd_set_pid).pack(side="left", padx=(12, 2))
+
+        srow = ctk.CTkFrame(parent, fg_color="transparent")
+        srow.pack(fill="x", padx=12, pady=(2, 4))
+        ctk.CTkLabel(srow, text="Hiz", width=24).pack(side="left")
+        self.speed_var = ctk.IntVar(value=35)
+        self.speed_slider = ctk.CTkSlider(
+            srow, from_=0, to=255, number_of_steps=255,
+            variable=self.speed_var,
+            command=lambda v: self.speed_lbl.configure(text=str(int(v))))
+        self.speed_slider.pack(side="left", fill="x", expand=True, padx=4)
+        self.speed_lbl = ctk.CTkLabel(srow, text="35", width=30)
+        self.speed_lbl.pack(side="left")
+        ctk.CTkButton(srow, text="Hiz Uygula", height=26, width=110,
+                      command=self._cmd_set_speed).pack(side="left", padx=(12, 2))
+
+        self.pid_status_lbl = ctk.CTkLabel(
+            parent, text="Aktif PID/hiz: -",
+            anchor="w", text_color=COL_MUTED, font=self.font_small)
+        self.pid_status_lbl.pack(fill="x", padx=12, pady=(0, 8))
+
     def _build_tab_sensors(self):
-        """Üstte sabit 250px preset paneli, altta scrollable sensör log."""
+        """ÜST: sabit 250px preset paneli → ORTA: PID + HIZ kartı (kalibrasyonun
+        altında) → ALT: sensör log KENDİ ayrı bölümünde (kalan alanı doldurur)."""
         sen = self.tab_sensors
         sen.grid_columnconfigure(0, weight=1)
-        sen.grid_rowconfigure(1, weight=1)
+        sen.grid_rowconfigure(2, weight=1)
 
         # ÜST: Sabit 250px preset paneli
         preset_frame = ctk.CTkFrame(sen, height=250)
@@ -970,9 +980,14 @@ class AGVControlApp(ctk.CTk):
         preset_frame.pack_propagate(False)
         self._build_preset_panel(preset_frame)
 
-        # ALT: Scrollable sensör log
+        # ORTA: PID + HIZ (kalibrasyonun hemen altında — Operations'tan taşındı)
+        pid_frame = ctk.CTkFrame(sen)
+        pid_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(4, 4))
+        self._build_pid_panel(pid_frame)
+
+        # ALT: Sensör log — YENİ ayrı bölüm (kendi kartında)
         log_frame = ctk.CTkFrame(sen)
-        log_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(4, 8))
+        log_frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=(4, 8))
 
         bar = ctk.CTkFrame(log_frame, fg_color="transparent")
         bar.pack(fill="x", padx=8, pady=6)
