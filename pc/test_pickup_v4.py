@@ -309,7 +309,23 @@ if out:
     assert_true("kalibrasyon belirgin düzeltme yaptı", bad > worst + 1.0,
                 f"bozuk {bad:.1f} vs kalibre {worst:.1f}")
 assert_true("az örnekte net hata",
-            calibrate_camera(KIN, cam_samples[:1])[0] is None)
+            calibrate_camera(KIN, cam_samples[:2])[0] is None)
+# YANAL yayilim YOK (hepsi x=0 cizgisinde) -> f cozulmemeli, KACMAMALI
+line_samples = cam_samples_at(TM, [(0.0, 11.0), (0.0, 14.0), (0.0, 17.0),
+                                   (0.0, 12.5), (0.0, 15.5)])
+lo, lr = calibrate_camera(guess, line_samples)
+assert_true("tek çizgi: f makul sınırda kalır (kaçmaz)",
+            lo is not None and 250 <= float(lo.get("cam_f") or 0) <= 950,
+            lo.get("cam_f") if lo else None)
+# saglamlik: gurultulu olcumle bile RMS makul + f sinirda
+import random as _r
+_r.seed(1)
+noisy = [(p, u + _r.uniform(-3, 3), v + _r.uniform(-3, 3), x, y)
+         for (p, u, v, x, y) in cam_samples]
+no, nr = calibrate_camera(guess, noisy)
+assert_true("gürültülü veri: f sınırda + RMS sonlu",
+            no is not None and 250 <= float(no.get("cam_f") or 0) <= 950
+            and isinstance(nr, (int, float)) and nr < 5.0, (no.get("cam_f") if no else None, nr))
 
 # PARALELKENAR KOL (el_abs): dirsek servosu on kolun MUTLAK acisini kontrol
 # eder -> shoulder oynayinca on kol egimi DEGISMEZ.

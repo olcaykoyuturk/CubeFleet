@@ -1090,11 +1090,13 @@ class CalibWizard(ctk.CTkToplevel):
                    "#fff", 13)
         self._para("\nKamera bileğe eğik bağlı; eğimi elle bilinemez. Bu yüzden "
                    "küpü BİLİNEN birkaç noktaya koyarsın, sistem geri çözer.")
-        self._para("\n① Kolu küpleri iyi gören bir duruşa getir ve "
-                   "BU ADIMDA OYNATMA (kol sabit). ② Küpü masaya koy, base'den "
-                   "İLERİ (y) ve YANA (x, sağ +) mesafesini cetvelle ölç, yaz, "
-                   "➕ bas. ③ Küpü farklı yerlere koyup en az 3 (iyisi 4-5) örnek "
-                   "topla. ④ 🧮 Çöz.", "#8af")
+        self._para("\n① Kolu küpleri iyi gören bir duruşa getir, bu adımda "
+                   "oynatma. ② Küpü koy, base'den İLERİ (y) ve YANA (x, sağ +/"
+                   "sol −) ölç, yaz, ➕ bas. ③ En az 4-5 örnek; ÖNEMLİ: küpleri "
+                   "hem farklı MESAFELERE hem SAĞA-SOLA yay (hepsi tek çizgide "
+                   "OLMASIN — yoksa odak çözülemez). ④ 🧮 Çöz.", "#8af")
+        self._para("Örn: (0,12) (4,15) (-4,13) (2,18) (-3,11) gibi karışık.",
+                   "#9c9", 11)
         row = ctk.CTkFrame(self.body, fg_color="transparent")
         row.pack(fill="x", pady=4)
         ctk.CTkLabel(row, text="x(yan)", width=44).pack(side="left")

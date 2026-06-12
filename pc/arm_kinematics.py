@@ -189,48 +189,85 @@ def _nelder_mead(f, x0, step, iters=400):
     return simplex[order[0]], fv[order[0]]
 
 
+# makul fiziksel sinirlar — optimizasyon disari kacmasin (f sonsuza gitmesin)
+CAM_BOUNDS = {"cam_pitch": (-70.0, 70.0), "cam_f": (250.0, 950.0),
+              "cam_dz": (-6.0, 14.0), "cam_dx": (-8.0, 8.0)}
+
+
 def calibrate_camera(cfg, samples, free=("cam_pitch", "cam_f", "cam_dz")):
     """Kamera parametrelerini OLCULMUS ornekkerden coz — kameranin bilege gore
     egimi/konumu/odagi elle bilinemez, ama kup BILINEN dunya (x, y)'lerine
     konup pikseli kaydedilerek geri cozulur.
       samples: [(servos, u, v, x_cm, y_cm), ...]
-      free: optimize edilecek param adlari (ornek sayisina gore kisalir)
-    cube_from_pixel tahmini olcumle eslesene dek Nelder-Mead (back-projection
-    hatasi). Donus: (yeni_param_sozlugu, rms_cm) | (None, hata_mesaji)."""
-    if len(samples) < 2:
-        return None, "en az 2 örnek gerekli"
+    Sinirli (CAM_BOUNDS) + cok-baslangicli Nelder-Mead. Yanal yayilim yoksa
+    (tum kupler ~tek cizgide) odak f COZULEMEZ -> otomatik atlanir (yoksa
+    sonsuza kacardi). Donus: (param_sozlugu, rms_cm) | (None, hata_mesaji)."""
+    if len(samples) < 3:
+        return None, "en az 3 örnek gerekli"
     free = list(free)
-    # ornek azsa serbest param sayisini kis (overfit/gozlemlenebilirlik)
+    xs = [s[3] for s in samples]
+    ys = [s[4] for s in samples]
+    lat = max(xs) - min(xs)
+    fwd = max(ys) - min(ys)
+    if fwd < 4.0:
+        return None, "örnekler ileri (y) yönde çok yakın — farklı mesafelere koy"
+    # YANAL yayilim yoksa f gozlemlenemez -> sabit tut (sonsuza kacmayi onler)
+    if lat < 5.0 and "cam_f" in free:
+        free.remove("cam_f")
     if len(samples) < 4 and "cam_dz" in free:
         free.remove("cam_dz")
-    if len(samples) < 3 and "cam_f" in free:
-        free.remove("cam_f")
     base = dict(cfg)
     cube = float(base.get("cube_cm") or 4.0)
     zp = cube / 2.0
 
     def cost(vec):
         c = dict(base)
+        pen = 0.0
         for k, val in zip(free, vec):
+            lo, hi = CAM_BOUNDS[k]
+            if val < lo:
+                pen += (lo - val) ** 2 * 50.0
+                val = lo
+            elif val > hi:
+                pen += (val - hi) ** 2 * 50.0
+                val = hi
             c[k] = val
         m = ArmModel(c)
         s = 0.0
         for (servos, u, v, x, y) in samples:
             est = m.cube_from_pixel(servos, u, v, zp)
-            if est is None:
-                s += 1e4
-            else:
-                s += (est[0] - x) ** 2 + (est[1] - y) ** 2
-        return s / len(samples)
+            s += 1e4 if est is None else (est[0] - x) ** 2 + (est[1] - y) ** 2
+        return s / len(samples) + pen
 
-    x0 = [float(base.get(k) or 0.0) for k in free]
-    steps = [5.0 if k == "cam_pitch" else (30.0 if k == "cam_f" else 1.5)
-             for k in free]
-    best, c = _nelder_mead(cost, x0, steps, iters=600)
+    def clampf(k, v):
+        lo, hi = CAM_BOUNDS[k]
+        return min(hi, max(lo, v))
+
+    # COK BASLANGIC: f ve pitch farkli baslangiclardan dene, en iyisini al
+    best_vec, best_c = None, float("inf")
+    f0s = [400.0] if "cam_f" not in free else [350.0, 550.0, 750.0]
+    for f0 in f0s:
+        for p0 in (0.0, -15.0, -30.0, -45.0):
+            x0 = []
+            for k in free:
+                if k == "cam_pitch":
+                    x0.append(p0)
+                elif k == "cam_f":
+                    x0.append(f0)
+                else:
+                    x0.append(clampf(k, float(base.get(k) or 0.0)))
+            steps = [8.0 if k == "cam_pitch" else (60.0 if k == "cam_f" else 2.0)
+                     for k in free]
+            sol, c = _nelder_mead(cost, x0, steps, iters=500)
+            if c < best_c:
+                best_vec, best_c = sol, c
     out = dict(base)
-    for k, val in zip(free, best):
-        out[k] = round(val, 3)
-    return out, round(c ** 0.5, 2)
+    for k, val in zip(free, best_vec or []):
+        out[k] = round(clampf(k, val), 3)
+    # cozulmeyen f icin makul varsayilan birak
+    if "cam_f" not in free and not out.get("cam_f"):
+        out["cam_f"] = 400.0
+    return out, round(max(0.0, best_c) ** 0.5, 2)
 
 
 class ArmModel:
