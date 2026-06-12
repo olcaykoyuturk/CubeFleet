@@ -834,9 +834,14 @@ class PickupController:
                 self._decision = (f"iniş sınırı h={self._h:.1f}cm — buton "
                                   f"bekleniyor {self._grace}/{self._cfg['grace_ticks']}")
                 if self._grace > int(self._cfg["grace_ticks"]):
+                    # IK None = kol UZANMA sinirinda (kup cok uzak) ->
+                    # YAKLASTIR; zarf blogu = katlanma sinirinda -> zarfi genislet
+                    why = ("küp ÇOK UZAK, kol tam uzandı yetişemedi — küpü "
+                           "KOLA YAKLAŞTIR (~13-16 cm)" if tgt is None else
+                           "kol katlanma (zarf) sınırında — arm_sim'de alçak "
+                           "pozları genişlet veya küpü biraz UZAĞA koy")
                     self._abort(f"En alt noktaya inildi (h={self._h:.1f} cm), "
-                                "buton yok — küp biraz uzağa konabilir veya "
-                                "arm_sim zarfını alçak pozlarda genişlet.")
+                                f"mıknatıs küpe değmedi — {why}.")
                 return
             self._h = next_h
             self._tgt = tgt
