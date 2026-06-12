@@ -49,7 +49,7 @@ from PIL import Image
 from arm_kinematics import (ArmModel, DEFAULTS as KIN_DEFAULTS,
                             point_from_height, calibrate_camera)
 from detector import get_detector
-from pickup_controller import PickupController
+from pickup_controller import PickupController, interp_band, gr_band
 from stream_reader import StreamReader
 
 PICKUP_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickup_config.json")
@@ -320,11 +320,8 @@ class PickupTest(ctk.CTk):
         lbl.pack(side="left")
 
         def apply(v):
-            v = max(0, min(180, round(v)))
-            s.set(v)
-            var.set(v)
-            lbl.configure(text=f"{name}: {v}")
-            self._http(f"/servo?id={idx}&a={v}")
+            # Elle slider/+/- — GUVENLI ZARF uygulanir (yasak kombinasyon engellenir)
+            self._manual_servo(idx, round(v))
 
         ctk.CTkButton(row, text="−", width=24,
                       command=lambda: apply(s.get() - 1)).pack(side="left", padx=(0, 1))
@@ -353,11 +350,75 @@ class PickupTest(ctk.CTk):
     def _set_servo(self, idx: int, val: int):
         """Programatik servo: slider + label + var + gercek kol birlikte."""
         val = max(0, min(180, int(round(val))))
-        s, lbl, name = self.servo_sliders[idx]
-        s.set(val)
-        self.arm_servo_vars[AGV][idx].set(val)
-        lbl.configure(text=f"{name}: {val}")
+        self._set_slider_widget(idx, val)
         self._http(f"/servo?id={idx}&a={val}")
+
+    def _set_slider_widget(self, idx: int, v: int):
+        """Slider + var + label gunceller — HTTP GONDERMEZ."""
+        s, lbl, name = self.servo_sliders[idx]
+        s.set(v)
+        self.arm_servo_vars[AGV][idx].set(v)
+        lbl.configure(text=f"{name}: {v}")
+
+    # ------------------------------------------------- GUVENLI ZARF (manuel)
+    def _envelope(self):
+        env = (self.pickup_cfg.get("autonomous", {}) or {}).get("safe_envelope")
+        if env and env.get("type") == "limits" and env.get("sh_grid"):
+            return env
+        return None
+
+    def _repair_pose(self, pose):
+        """elbow'u shoulder bandina, gripper'i (sh,el) bandina kistir. Band
+        tanimsizsa (olculmemis/yasak bolge) None. Zarf yoksa pose aynen."""
+        env = self._envelope()
+        if env is None:
+            return list(pose)
+        m = float(env.get("margin_deg", 0))
+        sh, el, gr = pose[1], pose[2], pose[3]
+        eb = interp_band(env["sh_grid"], env["el_min"], env["el_max"], sh)
+        if eb is None:
+            return None
+        lo, hi = eb[0] + m, eb[1] - m
+        if lo > hi:
+            return None
+        el = max(lo, min(hi, el))
+        gb = gr_band(env.get("gr_rows") or [], sh, el)
+        if gb is None:
+            return None
+        glo, ghi = gb[0] + m, gb[1] - m
+        if glo > ghi:
+            return None
+        gr = max(glo, min(ghi, gr))
+        out = list(pose)
+        out[2] = round(el)
+        out[3] = round(gr)
+        return out
+
+    def _manual_servo(self, idx: int, v: int):
+        """Elle servo komutu — GUVENLI ZARF: yeni poz yasak kombinasyona
+        giriyorsa elbow/gripper banda kistirilir; band tanimsiz/yasaksa hareket
+        REDDEDILIR (slider eski degerine doner). base zarfa dahil degil (serbest)."""
+        v = max(0, min(180, round(v)))
+        cur = [self.arm_servo_vars[AGV][i].get() for i in range(4)]
+        if v == cur[idx]:
+            return
+        cand = list(cur)
+        cand[idx] = v
+        rep = self._repair_pose(cand)
+        if rep is None:
+            self._set_slider_widget(idx, cur[idx])   # reddet, eski degere don
+            self.log(f"⛔ yasak bölge: {SERVO_NAMES[idx]} {v}° engellendi "
+                     f"(ölçülmemiş/çarpışma bölgesi)")
+            return
+        if rep[idx] != v:   # moved servo banda kistirildi
+            self.log(f"⛔ zarf sınırı: {SERVO_NAMES[idx]} {v}°→{rep[idx]}°")
+        changed = [i for i in range(4) if rep[i] != cur[i]]
+        for i in changed:
+            self._set_slider_widget(i, rep[i])
+            self._http(f"/servo?id={i}&a={rep[i]}")
+        drag = [SERVO_NAMES[i] for i in changed if i != idx]
+        if drag:
+            self.log(f"↪ zarf kıstı: {', '.join(drag)} otomatik ayarlandı")
 
     # ------------------------------------------------------------------ arama pozu
     SEARCH_POSE_DEFAULT = [104, 76, 124, 21]
