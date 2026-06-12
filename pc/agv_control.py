@@ -198,6 +198,11 @@ class AGVControlApp(ctk.CTk):
         self.detection_state: Dict[str, dict] = {}
         # Per-AGV son grip mikroswitch olayi (/poll'dan; log paneline gider)
         self.grip_state: Dict[str, dict] = {}
+        # Per-AGV /poll arm durumu {servos, targets, ts} — kontrolor GERCEK settle
+        # (servos==targets) icin okur. _cam_arm_state SADECE aktif AGV; bu per-AGV.
+        self.arm_state: Dict[str, dict] = {}
+        # Per-AGV otonom kapma kontroloru (PickupController v4); lazy olusur
+        self.auto_pickup: dict = {}
 
         # Görünüm modu: dual (varsayılan) = iki AGV yan yana, single = aktif olan büyük
         self.arm_view_mode:   str  = "dual"   # "dual" | "single"
@@ -593,19 +598,11 @@ class AGVControlApp(ctk.CTk):
         self.arm_left_scroll = ctk.CTkScrollableFrame(arm)
         self.arm_left_scroll.grid(row=1, column=0, sticky="nsew", padx=(8, 4), pady=4)
 
-        # Sağ scrollable: detection placeholder
+        # Sağ scrollable: OTONOM KAPMA paneli (aktif AGV'ye göre _refresh_arm_panel doldurur)
         self.arm_right_scroll = ctk.CTkScrollableFrame(arm)
         self.arm_right_scroll.grid(row=1, column=1, sticky="nsew", padx=(4, 8), pady=4)
-        ctk.CTkLabel(self.arm_right_scroll, text="GÖRÜNTÜ TANIMA",
-                     font=self.font_h2).pack(pady=(8, 4))
-        ctk.CTkLabel(self.arm_right_scroll,
-                     text=("(boş)\n\nYOLOv8 / model seçimi /\n"
-                           "confidence eşiği / bbox toggle\n"
-                           "ileride buraya gelecek."),
-                     text_color=COL_SUBTLE, justify="center",
-                     font=self.font_small).pack(pady=20)
 
-        # Sol kolonu ilk inşa (aktif AGV varsa)
+        # Sol+sağ kolonu ilk inşa (aktif AGV varsa)
         self._refresh_arm_panel()
 
     def _ensure_arm_state(self, agv_id: str):
@@ -665,7 +662,11 @@ class AGVControlApp(ctk.CTk):
         self._build_arm_cam_section(self.arm_left_scroll, agv_id)
         self._build_arm_controls_section(self.arm_left_scroll, agv_id)
 
-        # OTONOM KAPMA paneli KALDIRILDI — test araci: pc/pickup_test.py
+        # Sağ kolon: OTONOM KAPMA paneli (aktif AGV için)
+        if hasattr(self, "arm_right_scroll"):
+            for child in self.arm_right_scroll.winfo_children():
+                child.destroy()
+            self._build_arm_pickup_panel(self.arm_right_scroll, agv_id)
 
         # Stream sadece bu AGV için açık olsun
         self._sync_stream_readers(visible=[agv_id])
@@ -1454,8 +1455,14 @@ class AGVControlApp(ctk.CTk):
                                      daemon=True).start()
                     actions.append(f"{agv_id} kol freeze + mıknatıs OFF")
 
-        # (Otonom kapma bu uygulamadan kaldirildi — pc/pickup_test.py kendi
-        # ACIL DUR'una sahip.)
+        # 3. Aktif otonom kapma kontrolorlerini durdur (miknatis OFF + kosu bitir)
+        for agv_id, pc in list(self.auto_pickup.items()):
+            try:
+                if getattr(pc, "active", False):
+                    pc.estop()
+                    actions.append(f"{agv_id} kapma iptal")
+            except Exception:
+                pass
 
         # 4. UI feedback
         msg = "ACİL DUR: " + (", ".join(actions) if actions else "yapılacak iş yok")
@@ -2134,6 +2141,14 @@ class AGVControlApp(ctk.CTk):
                 cam_id = str(data.get("id", "CAM?"))
                 arm    = data.get("arm", {}) or {}
 
+                # Per-AGV arm state (kontrolor GERCEK settle icin: servos==targets)
+                srv, tgt = arm.get("servos"), arm.get("targets")
+                if (isinstance(srv, list) and isinstance(tgt, list)
+                        and len(srv) == 4 and len(tgt) == 4):
+                    self.arm_state[agv_id] = {"servos": [int(x) for x in srv],
+                                              "targets": [int(x) for x in tgt],
+                                              "ts": time.time()}
+
                 # Arm state cache (aktif AGV ise UI guncellenir)
                 if agv_id == self.active_agv:
                     self._cam_arm_state = {
@@ -2182,8 +2197,11 @@ class AGVControlApp(ctk.CTk):
                     self._cam_log_last_seq[agv_id] = cur_seq
             except Exception:
                 pass
-            # 1.5 sn aralikla yokla, stop sinyalinde hemen cik
-            self._cam_log_stop_evt.wait(1.5)
+            # Kontrolor aktifken HIZLI yokla (gercek settle icin taze arm_state),
+            # degilse 1.5 sn. stop sinyalinde hemen cik.
+            pc = self.auto_pickup.get(agv_id)
+            fast = bool(pc is not None and getattr(pc, "active", False))
+            self._cam_log_stop_evt.wait(0.15 if fast else 1.5)
 
     # NOT: _on_cam_toggle / _capture_background / _clear_background metotlari
     # eski background-subtraction tabanli tespit pipeline'i ile birlikte
@@ -2200,6 +2218,171 @@ class AGVControlApp(ctk.CTk):
         except Exception as e:
             print(f"pickup_config yuklenemedi: {e}")
             return {}
+
+    def _pickup_save_config(self):
+        import json
+        try:
+            with open(PICKUP_CFG_PATH, "w", encoding="utf-8") as f:
+                json.dump(self.pickup_cfg, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            self._set_status(f"pickup_config kaydedilemedi: {e}", err=True)
+
+    # ---------- OTONOM KAPMA (PickupController v4 entegrasyonu) ----------
+    def _build_arm_pickup_panel(self, parent, agv_id: str):
+        """Arm sekmesi sağ kolonu: otonom kapma başlat/durdur + canlı durum +
+        ince ayar (aim trim + grip açı). Kalibrasyon pickup_test sihirbazında
+        yapılır; bu panel SADECE çalıştırır + saha ince ayarı."""
+        from arm_kinematics import ArmModel
+        ctk.CTkLabel(parent, text="🤖 OTONOM KAPMA",
+                     font=self.font_h2).pack(pady=(8, 2))
+        kin = (self.pickup_cfg.get("autonomous", {}) or {}).get("kinematics") or {}
+        miss = ArmModel(kin).missing()
+        env = (self.pickup_cfg.get("autonomous", {}) or {}).get("safe_envelope")
+        ready = (not miss) and bool(env and env.get("sh_grid"))
+        if not ready:
+            txt = ("⚠ Kalibrasyon eksik — pickup_test.py 'KİNEMATİK SİHİRBAZI' ile "
+                   "tamamla:\n")
+            if not (env and env.get("sh_grid")):
+                txt += "• güvenli zarf (arm_sim) yok\n"
+            if miss:
+                txt += "• kinematik: " + ", ".join(miss)
+            ctk.CTkLabel(parent, text=txt, text_color=COL_WARN, justify="left",
+                         font=self.font_small, wraplength=320).pack(padx=10, pady=6)
+        else:
+            ctk.CTkLabel(parent, text="✅ kalibrasyon hazır",
+                         text_color=COL_SUCCESS, font=self.font_small).pack(pady=2)
+
+        brow = ctk.CTkFrame(parent, fg_color="transparent")
+        brow.pack(fill="x", padx=10, pady=4)
+        ctk.CTkButton(brow, text="▶ BAŞLAT", fg_color=COL_SUCCESS,
+                      command=lambda: self._pickup_start(agv_id)
+                      ).pack(side="left", expand=True, fill="x", padx=(0, 3))
+        ctk.CTkButton(brow, text="⏹ DURDUR", fg_color=COL_MUTED,
+                      command=lambda: self._pickup_stop(agv_id)
+                      ).pack(side="left", expand=True, fill="x", padx=(3, 0))
+
+        self._pickup_status_lbl = ctk.CTkLabel(
+            parent, text="durum: IDLE", font=self.font_small, justify="left",
+            text_color=COL_INFO, wraplength=320)
+        self._pickup_status_lbl.pack(anchor="w", padx=10, pady=(4, 6))
+
+        # İNCE AYAR — mıknatıs merkez (aim trim) + grip açı
+        ctk.CTkLabel(parent, text="🎯 İNCE AYAR (mıknatıs merkez)",
+                     font=self.font_small).pack(anchor="w", padx=10, pady=(6, 0))
+        self._pickup_trim_lbl = ctk.CTkLabel(parent, text="", font=self.font_small,
+                                             text_color=COL_SUBTLE)
+        self._pickup_trim_lbl.pack(anchor="w", padx=10)
+        t1 = ctk.CTkFrame(parent, fg_color="transparent")
+        t1.pack(fill="x", padx=10, pady=1)
+        for lbl, k, d in (("⬆ İleri", "aim_trim_fwd", 0.3),
+                          ("⬇ Geri", "aim_trim_fwd", -0.3),
+                          ("⬅ Sol", "aim_trim_lat", -0.3),
+                          ("➡ Sağ", "aim_trim_lat", 0.3)):
+            ctk.CTkButton(t1, text=lbl, width=58, fg_color=COL_INFO,
+                          command=lambda a=agv_id, kk=k, dd=d: self._pickup_trim(a, kk, dd)
+                          ).pack(side="left", expand=True, fill="x", padx=1)
+        t2 = ctk.CTkFrame(parent, fg_color="transparent")
+        t2.pack(fill="x", padx=10, pady=1)
+        ctk.CTkLabel(t2, text="grip açı", width=54).pack(side="left")
+        ctk.CTkButton(t2, text="⬆ yukarı", width=70, fg_color=COL_INFO,
+                      command=lambda a=agv_id: self._pickup_trim(a, "grab_gamma_off", 1.0)
+                      ).pack(side="left", expand=True, fill="x", padx=1)
+        ctk.CTkButton(t2, text="⬇ aşağı", width=70, fg_color=COL_INFO,
+                      command=lambda a=agv_id: self._pickup_trim(a, "grab_gamma_off", -1.0)
+                      ).pack(side="left", expand=True, fill="x", padx=1)
+        ctk.CTkButton(parent, text="↺ ince ayar sıfırla", fg_color=COL_MUTED,
+                      command=lambda a=agv_id: self._pickup_trim_reset(a)
+                      ).pack(anchor="w", padx=10, pady=2)
+        self._pickup_refresh_trim_lbl()
+
+    def _pickup_get(self, agv_id: str):
+        """agv_id için PickupController (lazy oluştur)."""
+        pc = self.auto_pickup.get(agv_id)
+        if pc is None:
+            from pickup_controller import PickupController
+            pc = PickupController(self, agv_id)
+            self.auto_pickup[agv_id] = pc
+        return pc
+
+    def _pickup_start(self, agv_id: str):
+        if not (self.detect_vars.get(agv_id) and self.detect_vars[agv_id].get()):
+            self._set_status("Önce 🎯 YOLO Tespit'i aç (Arm sekmesi)", err=True)
+            return
+        # Diskten taze config (sihirbaz güncellemiş olabilir)
+        self.pickup_cfg = self._pickup_load_config()
+        pc = self.auto_pickup.get(agv_id)
+        if pc is not None and pc.active:
+            self._set_status("Kapma zaten çalışıyor", err=True)
+            return
+        pc = self._pickup_get(agv_id)
+        ok = pc.start()
+        if not ok:
+            self._set_status(f"Kapma başlamadı: {pc.message}", err=True)
+
+    def _pickup_stop(self, agv_id: str):
+        pc = self.auto_pickup.get(agv_id)
+        if pc is not None:
+            pc.stop()
+
+    def _pickup_log(self, agv_id: str, msg: str):
+        """PickupController log mesajını Log paneline yaz (thread-safe değil —
+        kontrolör UI thread'inde tick'liyor zaten)."""
+        try:
+            self._add_log(LogEvent(agvId=agv_id, message=f"[KAPMA] {msg}",
+                                   time_ms=0, wall_time=time.time()))
+        except Exception:
+            pass
+
+    def _pickup_ui_refresh(self, agv_id: str):
+        """Kontrolör durumunu sağ paneldeki etikete yaz (yalnız aktif AGV)."""
+        if agv_id != self.active_agv:
+            return
+        lbl = getattr(self, "_pickup_status_lbl", None)
+        if lbl is None:
+            return
+        pc = self.auto_pickup.get(agv_id)
+        if pc is None:
+            lbl.configure(text="durum: IDLE")
+            return
+        live = getattr(pc, "live", {}) or {}
+        extra = ""
+        if live:
+            extra = (f"\nküp=({live.get('x','-')},{live.get('y','-')})cm "
+                     f"h={live.get('h','-')}cm")
+        try:
+            lbl.configure(text=f"durum: {pc.state}\n{pc.message}{extra}")
+        except Exception:
+            pass
+
+    def _pickup_trim(self, agv_id: str, key: str, delta: float):
+        auto = self.pickup_cfg.setdefault("autonomous", {})
+        auto[key] = round(float(auto.get(key, 0) or 0) + delta, 2)
+        pc = self.auto_pickup.get(agv_id)
+        if pc is not None:
+            pc._cfg[key] = auto[key]
+        self._pickup_save_config()
+        self._pickup_refresh_trim_lbl()
+        self._pickup_log(agv_id, f"ince ayar {key} = {auto[key]:+g}")
+
+    def _pickup_trim_reset(self, agv_id: str):
+        auto = self.pickup_cfg.setdefault("autonomous", {})
+        for k in ("aim_trim_fwd", "aim_trim_lat", "grab_gamma_off"):
+            auto[k] = 0.0
+            pc = self.auto_pickup.get(agv_id)
+            if pc is not None:
+                pc._cfg[k] = 0.0
+        self._pickup_save_config()
+        self._pickup_refresh_trim_lbl()
+
+    def _pickup_refresh_trim_lbl(self):
+        lbl = getattr(self, "_pickup_trim_lbl", None)
+        if lbl is None:
+            return
+        auto = self.pickup_cfg.get("autonomous", {}) or {}
+        f = float(auto.get("aim_trim_fwd", 0) or 0)
+        la = float(auto.get("aim_trim_lat", 0) or 0)
+        ga = float(auto.get("grab_gamma_off", 0) or 0)
+        lbl.configure(text=f"ileri {f:+g}  yan {la:+g} (sağ+)  grip {ga:+g}°")
 
     # ---------- Kapma kalibrasyonu (base sweep) — KALDIRILDI ----------
     # Eski manuel tarama state machine'i (_pickup_scan_*, SCAN_TYPES, scan_pose)
@@ -2251,6 +2434,7 @@ class AGVControlApp(ctk.CTk):
                     self.detection_state[agv_id] = {
                         "cx": best.cx, "cy": best.cy, "area": best.area,
                         "conf": best.conf, "h": best.height, "w": best.x2 - best.x1,
+                        "x1": best.x1, "y1": best.y1, "x2": best.x2, "y2": best.y2,
                         "frame_w": frame.shape[1], "frame_h": frame.shape[0], "ts": now,
                     }
                 else:
