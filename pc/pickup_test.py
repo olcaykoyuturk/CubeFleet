@@ -46,7 +46,8 @@ import customtkinter as ctk
 import cv2
 from PIL import Image
 
-from arm_kinematics import ArmModel, DEFAULTS as KIN_DEFAULTS, point_from_height
+from arm_kinematics import (ArmModel, DEFAULTS as KIN_DEFAULTS,
+                            point_from_height, calibrate_camera)
 from detector import get_detector
 from pickup_controller import PickupController
 from stream_reader import StreamReader
@@ -777,7 +778,10 @@ class CalibWizard(ctk.CTkToplevel):
         ]
         self.meas_entries: dict = {}
         self.h_entry: ctk.CTkEntry | None = None
-        self.f_entry: ctk.CTkEntry | None = None
+        self.cx_entry: ctk.CTkEntry | None = None
+        self.cy_entry: ctk.CTkEntry | None = None
+        self.cam_samples: list = []
+        self.cam_rms = None
 
         head = ctk.CTkFrame(self, fg_color="transparent")
         head.pack(fill="x", padx=12, pady=(10, 0))
@@ -1082,34 +1086,86 @@ class CalibWizard(ctk.CTkToplevel):
         return ready, ("tamam ✔" if ready else "2 ayrık nokta gerekli")
 
     def _s_focal(self):
-        self._para("7) ODAK (kamera) — küpün kaç piksel göründüğünü mesafeye "
-                   "bağlar:", "#fff", 13)
-        self._para("\nKüpü kameranın TAM karşısına, cetvelle ölçtüğün düz "
-                   "mesafeye koy. Tespit (yeşil kutu) küpü görüyor olmalı. "
-                   "Mesafeyi yaz, yakala.")
+        self._para("7) KAMERA — açı + odak (mesafeyi DOĞRU ölçmesi için):",
+                   "#fff", 13)
+        self._para("\nKamera bileğe eğik bağlı; eğimi elle bilinemez. Bu yüzden "
+                   "küpü BİLİNEN birkaç noktaya koyarsın, sistem geri çözer.")
+        self._para("\n① Kolu küpleri iyi gören bir duruşa getir ve "
+                   "BU ADIMDA OYNATMA (kol sabit). ② Küpü masaya koy, base'den "
+                   "İLERİ (y) ve YANA (x, sağ +) mesafesini cetvelle ölç, yaz, "
+                   "➕ bas. ③ Küpü farklı yerlere koyup en az 3 (iyisi 4-5) örnek "
+                   "topla. ④ 🧮 Çöz.", "#8af")
         row = ctk.CTkFrame(self.body, fg_color="transparent")
         row.pack(fill="x", pady=4)
-        ctk.CTkLabel(row, text="mesafe cm", width=70).pack(side="left")
-        self.f_entry = ctk.CTkEntry(row, width=70)
-        self.f_entry.insert(0, "20")
-        self.f_entry.pack(side="left", padx=(0, 6))
-        self._cap_btn(row, "🎯 odak yakala", lambda: self._do(self._cap_focal()))
-        f = self.app._kin().get("cam_f")
+        ctk.CTkLabel(row, text="x(yan)", width=44).pack(side="left")
+        self.cx_entry = ctk.CTkEntry(row, width=52)
+        self.cx_entry.insert(0, "0")
+        self.cx_entry.pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(row, text="y(ileri)", width=48).pack(side="left")
+        self.cy_entry = ctk.CTkEntry(row, width=52)
+        self.cy_entry.pack(side="left", padx=(0, 4))
+        self._cap_btn(row, "➕ örnek ekle", lambda: self._do(self._add_cam_sample))
+        samples = getattr(self, "cam_samples", [])
+        for i, s in enumerate(samples):
+            self._para(f"  #{i+1}: ölçülen ({s[3]:g}, {s[4]:g}) cm  "
+                       f"piksel ({s[1]:.0f}, {s[2]:.0f})", "#9c9", 11)
+        if samples:
+            r2 = ctk.CTkFrame(self.body, fg_color="transparent")
+            r2.pack(fill="x", pady=2)
+            self._cap_btn(r2, "🧮 Çöz (kamera açısı+odak)",
+                          lambda: self._do(self._solve_cam))
+            ctk.CTkButton(r2, text="🗑", fg_color="#a33", width=40,
+                          command=lambda: self._do(self._clr_cam)
+                          ).pack(side="left", padx=2)
+        k = self.app._kin()
         det = self.app.detection_state.get(AGV)
-        seen = "küp görülüyor ✔" if det else "⚠ küp tespit edilmiyor (🎯 Tespit aç)"
-        self._para(f"\ncam_f = {f:g} px   ({seen})",
+        seen = "küp görülüyor ✔" if det else "⚠ küp tespit YOK (🎯 Tespit aç)"
+        self._para(f"\npitch={float(k.get('cam_pitch') or 0):g}°  "
+                   f"f={float(k.get('cam_f') or 0):g}px  "
+                   f"dz={float(k.get('cam_dz') or 0):g}cm   ({seen})",
                    "#9c9" if det else "#fc6", 11)
-        return True, "odak kalibre edildi (atlanabilir, varsayılan ~370)"
+        rms = getattr(self, "cam_rms", None)
+        if rms is not None:
+            self._para(f"çözüm hatası (RMS): {rms:g} cm "
+                       f"{'✔ iyi' if rms < 2 else '⚠ yüksek — daha çok/ayrık örnek'}",
+                       "#7c7" if rms < 2 else "#fc6", 12)
+        return True, "kamerayı çöz (≥3 örnek) veya atla"
 
-    def _cap_focal(self):
-        def fn():
-            try:
-                dist = float((self.f_entry.get() if self.f_entry else "")
-                             .replace(",", "."))
-            except Exception:
-                return False, "mesafe sayı değil"
-            return self.app._calib_focal_val(dist)
-        return fn
+    def _add_cam_sample(self):
+        d = self.app.detection_state.get(AGV)
+        if not d:
+            return False, "küp tespit edilmiyor (🎯 Tespit aç)"
+        try:
+            x = float((self.cx_entry.get() if self.cx_entry else "0").replace(",", "."))
+            y = float((self.cy_entry.get() if self.cy_entry else "").replace(",", "."))
+        except Exception:
+            return False, "x/y sayı değil (cm)"
+        if not hasattr(self, "cam_samples"):
+            self.cam_samples = []
+        servos = self._servos()
+        self.cam_samples.append((servos, float(d["cx"]), float(d["cy"]), x, y))
+        return True, f"örnek {len(self.cam_samples)}: ({x:g}, {y:g}) cm eklendi"
+
+    def _clr_cam(self):
+        self.cam_samples = []
+        self.cam_rms = None
+        return True, "kamera örnekleri silindi"
+
+    def _solve_cam(self):
+        samples = getattr(self, "cam_samples", [])
+        if len(samples) < 3:
+            return False, f"en az 3 örnek gerekli ({len(samples)} var)"
+        out, res = calibrate_camera(self.app._kin(), samples)
+        if out is None:
+            return False, str(res)
+        kin = self._kin()
+        for k in ("cam_pitch", "cam_f", "cam_dz", "cam_dx"):
+            if k in out:
+                kin[k] = out[k]
+        self.cam_rms = res
+        self.app._refresh_kin_status()
+        return True, (f"çözüldü: pitch={kin.get('cam_pitch'):g}° "
+                      f"f={kin.get('cam_f'):g}px, RMS={res:g} cm")
 
     def _s_verify(self):
         self._para("8) DOĞRULAMA", "#fff", 13)

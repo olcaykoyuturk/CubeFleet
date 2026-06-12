@@ -151,6 +151,88 @@ def point_from_height(model: "ArmModel", joint: str, servos, z_cm: float):
     return (s3, round(g - beta, 2))
 
 
+def _nelder_mead(f, x0, step, iters=400):
+    """Bagimsiz Nelder-Mead (scipy YOK) — kucuk param sayisi icin yeterli.
+    f: maliyet; x0: baslangic; step: ilk simplex adimlari. Donus: (en_iyi, maliyet)."""
+    n = len(x0)
+    simplex = [list(x0)]
+    for i in range(n):
+        p = list(x0)
+        p[i] += step[i] if step[i] else 1.0
+        simplex.append(p)
+    fv = [f(p) for p in simplex]
+    for _ in range(iters):
+        order = sorted(range(n + 1), key=lambda i: fv[i])
+        simplex = [simplex[i] for i in order]
+        fv = [fv[i] for i in order]
+        cen = [sum(simplex[i][j] for i in range(n)) / n for j in range(n)]
+        xr = [cen[j] + (cen[j] - simplex[-1][j]) for j in range(n)]
+        fr = f(xr)
+        if fv[0] <= fr < fv[-2]:
+            simplex[-1], fv[-1] = xr, fr
+            continue
+        if fr < fv[0]:
+            xe = [cen[j] + 2.0 * (cen[j] - simplex[-1][j]) for j in range(n)]
+            fe = f(xe)
+            simplex[-1], fv[-1] = (xe, fe) if fe < fr else (xr, fr)
+            continue
+        xc = [cen[j] + 0.5 * (simplex[-1][j] - cen[j]) for j in range(n)]
+        fc = f(xc)
+        if fc < fv[-1]:
+            simplex[-1], fv[-1] = xc, fc
+            continue
+        for i in range(1, n + 1):
+            simplex[i] = [simplex[0][j] + 0.5 * (simplex[i][j] - simplex[0][j])
+                          for j in range(n)]
+            fv[i] = f(simplex[i])
+    order = sorted(range(n + 1), key=lambda i: fv[i])
+    return simplex[order[0]], fv[order[0]]
+
+
+def calibrate_camera(cfg, samples, free=("cam_pitch", "cam_f", "cam_dz")):
+    """Kamera parametrelerini OLCULMUS ornekkerden coz — kameranin bilege gore
+    egimi/konumu/odagi elle bilinemez, ama kup BILINEN dunya (x, y)'lerine
+    konup pikseli kaydedilerek geri cozulur.
+      samples: [(servos, u, v, x_cm, y_cm), ...]
+      free: optimize edilecek param adlari (ornek sayisina gore kisalir)
+    cube_from_pixel tahmini olcumle eslesene dek Nelder-Mead (back-projection
+    hatasi). Donus: (yeni_param_sozlugu, rms_cm) | (None, hata_mesaji)."""
+    if len(samples) < 2:
+        return None, "en az 2 örnek gerekli"
+    free = list(free)
+    # ornek azsa serbest param sayisini kis (overfit/gozlemlenebilirlik)
+    if len(samples) < 4 and "cam_dz" in free:
+        free.remove("cam_dz")
+    if len(samples) < 3 and "cam_f" in free:
+        free.remove("cam_f")
+    base = dict(cfg)
+    cube = float(base.get("cube_cm") or 4.0)
+    zp = cube / 2.0
+
+    def cost(vec):
+        c = dict(base)
+        for k, val in zip(free, vec):
+            c[k] = val
+        m = ArmModel(c)
+        s = 0.0
+        for (servos, u, v, x, y) in samples:
+            est = m.cube_from_pixel(servos, u, v, zp)
+            if est is None:
+                s += 1e4
+            else:
+                s += (est[0] - x) ** 2 + (est[1] - y) ** 2
+        return s / len(samples)
+
+    x0 = [float(base.get(k) or 0.0) for k in free]
+    steps = [5.0 if k == "cam_pitch" else (30.0 if k == "cam_f" else 1.5)
+             for k in free]
+    best, c = _nelder_mead(cost, x0, steps, iters=600)
+    out = dict(base)
+    for k, val in zip(free, best):
+        out[k] = round(val, 3)
+    return out, round(c ** 0.5, 2)
+
+
 class ArmModel:
     """Tum kinematik hesaplar: FK, IK, kamera isini, izdusum."""
 

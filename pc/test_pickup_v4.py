@@ -24,7 +24,7 @@ for _stream in (sys.stdout, sys.stderr):
         _reconf(encoding="utf-8")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from arm_kinematics import ArmModel, point_from_height
+from arm_kinematics import ArmModel, point_from_height, calibrate_camera
 from pickup_controller import PickupController
 
 _passed = 0
@@ -258,6 +258,58 @@ assert_true("📏 uç yüks. → gamma_rel geri çıkıyor",
 assert_true("📏 H0 yokken net hata",
             isinstance(point_from_height(ArmModel({**KIN, "H0": 0}), "sh",
                                          START, 15.0), str))
+
+# KAMERA KALIBRASYONU: bilerek BOZUK kamera (egim+odak) kur, bilinen dunya
+# noktalarindan geri coz -> dogru pitch/f bulunmali, RMS kucuk olmali.
+true_cam = {**KIN, "cam_pitch": -12.0, "cam_f": 410.0, "cam_dz": 3.5}
+TM = ArmModel(true_cam)
+def cam_samples_at(model, pts, hover=10.0):
+    out = []
+    for (cx, cy) in pts:
+        pose = model.ik(cx, cy, 4.0 + hover)
+        if pose is None:
+            continue
+        pj = model.project_point(pose, cx, cy, 2.0)
+        if pj is not None and 0 <= pj[0] <= W and 0 <= pj[1] <= H:
+            out.append((pose, pj[0], pj[1], cx, cy))
+    return out
+
+
+cam_samples = cam_samples_at(
+    TM, [(1.0, 13.0), (3.0, 14.0), (-2.0, 12.0), (0.0, 15.0), (2.0, 11.0)])
+assert_true("kamera test örnekleri üretildi (≥4)", len(cam_samples) >= 4,
+            len(cam_samples))
+# bozuk baslangic (pitch=0, f=370, dz=2.5) -> coz
+guess = {**KIN, "cam_pitch": 0.0, "cam_f": 370.0, "cam_dz": 2.5}
+out, rms = calibrate_camera(guess, cam_samples)
+assert_true("kamera çözümü RMS < 0.5 cm",
+            out is not None and isinstance(rms, (int, float)) and rms < 0.5,
+            f"rms={rms}")
+# ASIL TEST: kalibre model TUTULAN-DIŞI yeni noktalarda küpü doğru bulmalı
+# (param degerleri degil, TAHMIN dogrulugu onemli — pitch/dz dejenerasyonu)
+if out:
+    CM = ArmModel(out)
+    held = cam_samples_at(TM, [(0.0, 13.5), (2.5, 12.5), (-1.5, 14.0)])
+    worst = 0.0
+    for (pose, u, v, x, y) in held:
+        est = CM.cube_from_pixel(pose, u, v, 2.0)
+        if est is None:
+            worst = 99.0
+        else:
+            worst = max(worst, ((est[0] - x) ** 2 + (est[1] - y) ** 2) ** 0.5)
+    assert_true("kalibre model held-out küpü <1 cm bulur", worst < 1.0,
+                f"en kötü {worst:.2f} cm")
+    # bozuk model (kalibrasyonsuz) AYNI noktalarda KÖTÜ olmali (anlamli fark)
+    BM = ArmModel(guess)
+    bad = 0.0
+    for (pose, u, v, x, y) in held:
+        est = BM.cube_from_pixel(pose, u, v, 2.0)
+        if est:
+            bad = max(bad, ((est[0] - x) ** 2 + (est[1] - y) ** 2) ** 0.5)
+    assert_true("kalibrasyon belirgin düzeltme yaptı", bad > worst + 1.0,
+                f"bozuk {bad:.1f} vs kalibre {worst:.1f}")
+assert_true("az örnekte net hata",
+            calibrate_camera(KIN, cam_samples[:1])[0] is None)
 
 # PARALELKENAR KOL (el_abs): dirsek servosu on kolun MUTLAK acisini kontrol
 # eder -> shoulder oynayinca on kol egimi DEGISMEZ.
