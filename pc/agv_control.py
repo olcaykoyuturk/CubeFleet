@@ -645,19 +645,20 @@ class AGVControlApp(ctk.CTk):
         self.cam_video_lbls.clear()
         self.cam_info_lbls.clear()
 
+        # Kol + kamera + otonom kapma HTTP-DIREKT calisir (WS/AGV baglantisi
+        # GEREKMEZ). AGV WS'e bagli degilse yapilandirilmis (cam URL'li) ilk
+        # kamerayi kullan; o da yoksa varsayilan tek kol. Boylece cihaz bagli
+        # olmasa da Arm sekmesi + kapma paneli gorunur ve kullanilir.
         agv_id = self.active_agv
-        if not agv_id or agv_id not in self.agvs:
-            self.arm_active_lbl.configure(text="(AGV seçilmedi)",
-                                           text_color=COL_SUBTLE)
-            ctk.CTkLabel(self.arm_left_scroll,
-                         text="Sol AGV listesinden bir AGV seçin",
-                         text_color=COL_SUBTLE, font=self.font_small
-                         ).pack(pady=20)
-            self._sync_stream_readers(visible=[])
-            return
+        if not agv_id:
+            cfg_ids = sorted(self.agv_config_store.agvs.keys())
+            agv_id = cfg_ids[0] if cfg_ids else "CAM_1"
 
-        self.arm_active_lbl.configure(text=f"AGV: {agv_id}",
-                                       text_color=COL_TXT_BAGLI)
+        connected = agv_id in self.agvs and getattr(
+            self.agvs.get(agv_id), "connected", False)
+        self.arm_active_lbl.configure(
+            text=f"AGV: {agv_id}" + ("" if connected else "  (bağlı değil)"),
+            text_color=COL_TXT_BAGLI if connected else COL_WARN)
         self._ensure_arm_state(agv_id)
         self._build_arm_cam_section(self.arm_left_scroll, agv_id)
         self._build_arm_controls_section(self.arm_left_scroll, agv_id)
@@ -670,6 +671,10 @@ class AGVControlApp(ctk.CTk):
 
         # Stream sadece bu AGV için açık olsun
         self._sync_stream_readers(visible=[agv_id])
+        # /poll thread'i (grip olaylari + arm_state) — WS baglantisindan BAGIMSIZ
+        # baslat ki cihaz WS'e bagli olmasa da otonom kapma butonu algilasin
+        # (cam URL'si yapilandirilmamissa sessizce atlar; idempotent).
+        self._cam_log_start_for_agv(agv_id)
 
     def _build_arm_cam_section(self, parent, agv_id: str):
         card = ctk.CTkFrame(parent)
