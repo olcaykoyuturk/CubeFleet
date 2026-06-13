@@ -92,18 +92,22 @@ def test_heading_convention(g: Graph):
 
 
 def test_free_sides(g: Graph):
-    print("\n[2] free_sides — cizgili kenarlar dislanir")
-    # Kullanicinin ornegi: F'nin N/S komsusu var (C/I), kup yalniz E/W'ye konur
-    check("F → {E, W}", set(free_sides(g, "F")) == {"E", "W"},
+    print("\n[2] free_sides — cizgili kenarlar dislanir (4×3 A-L duzeni)")
+    # F'nin W/E/S komsusu var (E/G/J), kuzeyi bos -> kup yalniz N'e konur
+    check("F → {N}", set(free_sides(g, "F")) == {"N"},
           f"got {free_sides(g, 'F')}")
-    check("B → {N}", set(free_sides(g, "B")) == {"N"},
-          f"got {free_sides(g, 'B')}")
-    check("E → {E}", set(free_sides(g, "E")) == {"E"},
-          f"got {free_sides(g, 'E')}")
-    check("H → {S}", set(free_sides(g, "H")) == {"S"},
-          f"got {free_sides(g, 'H')}")
-    check("A → {N, S, W}", set(free_sides(g, "A")) == {"N", "S", "W"},
+    # C'nin W/E/S komsusu var (B/D/G), kuzeyi bos
+    check("C → {N}", set(free_sides(g, "C")) == {"N"},
+          f"got {free_sides(g, 'C')}")
+    # A: E/S komsu (B/E) -> N,W bos
+    check("A → {N, W}", set(free_sides(g, "A")) == {"N", "W"},
           f"got {free_sides(g, 'A')}")
+    # E: N/E komsu (A/F) -> S,W bos
+    check("E → {S, W}", set(free_sides(g, "E")) == {"S", "W"},
+          f"got {free_sides(g, 'E')}")
+    # D: yalniz W komsu (C) -> N,E,S bos (sag sutun dikey bagli degil)
+    check("D → {N, E, S}", set(free_sides(g, "D")) == {"N", "E", "S"},
+          f"got {free_sides(g, 'D')}")
     check("bilinmeyen node → []", free_sides(g, "Z") == [])
     # Tum node'larda: free + kenarli = 4 yon, kesisim bos
     for n in g.nodes:

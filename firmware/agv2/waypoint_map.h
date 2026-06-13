@@ -4,25 +4,26 @@
 // =============================================================================
 // waypoint_map.h — AGV grid haritası (derleme zamanında sabit)
 //
-// Grid yapısı (10 kenar, cyclic — alternatif rota mümkün):
-//   A─B─C
-//     │ │
-//   D─E F
-//   │ │ │
-//   G─H─I
+// Grid yapısı (12 kenar, 4×3 — A-L):
+//   A─B─C─D
+//   │   │
+//   E─F─G─H
+//       │
+//   I─J─K─L
 //
-// KUZEY = yukarı (A,B,C yönü)   GÜNEY = aşağı (G,H,I yönü)
-// DOĞU  = sağ   (C,F,I yönü)   BATI  = sol   (A,D,G yönü)
+// KUZEY = yukarı (A,B,C,D yönü)   GÜNEY = aşağı (I,J,K,L yönü)
+// DOĞU  = sağ   (D,H,L yönü)      BATI  = sol   (A,E,I yönü)
 //
-// 2026-05 güncelleme: G-H ve C-F kenarları eklendi (graf'ı ağaçtan döngülü
-// hale getirdi; multi-AGV alternatif rota artık mümkün).
+// 2026-06: 3×3 (A-I) düzeninden 4×3 (A-L) yeni saha düzenine geçildi.
+// Dikey bağlantılar yalnızca A-E, C-G, F-J (sağ sütun D-H-L bağlı değil).
+// firmware/agv/waypoint_map.h ile BİREBİR aynı (test_waypoint_sync guard).
 // =============================================================================
 
-#define NUM_WAYPOINTS   9
+#define NUM_WAYPOINTS   12
 #define MAX_NEIGHBORS   4
 
 struct Connection {
-    char    to;    // komşu waypoint adı ('A'–'I')
+    char    to;    // komşu waypoint adı ('A'–'L')
     Heading dir;   // bu yönde gidilince o komşuya ulaşılır
 };
 
@@ -33,14 +34,17 @@ struct WaypointDef {
 };
 
 static const WaypointDef WAYPOINT_MAP[NUM_WAYPOINTS] = {
-    //  İsim   Komşular                                                          Adet
-    {'A', {{'B', EAST}},                                                          1},
-    {'B', {{'A', WEST},  {'C', EAST},  {'E', SOUTH}},                             3},
-    {'C', {{'B', WEST},  {'F', SOUTH}},                                           2},
-    {'D', {{'E', EAST},  {'G', SOUTH}},                                           2},
-    {'E', {{'D', WEST},  {'B', NORTH}, {'H', SOUTH}},                             3},
-    {'F', {{'I', SOUTH}, {'C', NORTH}},                                           2},
-    {'G', {{'D', NORTH}, {'H', EAST}},                                            2},
-    {'H', {{'E', NORTH}, {'I', EAST},  {'G', WEST}},                              3},
-    {'I', {{'H', WEST},  {'F', NORTH}},                                           2},
+    //  İsim   Komşular                                              Adet
+    {'A', {{'B', EAST},  {'E', SOUTH}},                              2},
+    {'B', {{'A', WEST},  {'C', EAST}},                               2},
+    {'C', {{'B', WEST},  {'D', EAST},  {'G', SOUTH}},                3},
+    {'D', {{'C', WEST}},                                             1},
+    {'E', {{'A', NORTH}, {'F', EAST}},                               2},
+    {'F', {{'E', WEST},  {'G', EAST},  {'J', SOUTH}},                3},
+    {'G', {{'C', NORTH}, {'F', WEST},  {'H', EAST}},                 3},
+    {'H', {{'G', WEST}},                                             1},
+    {'I', {{'J', EAST}},                                             1},
+    {'J', {{'F', NORTH}, {'I', WEST},  {'K', EAST}},                 3},
+    {'K', {{'J', WEST},  {'L', EAST}},                               2},
+    {'L', {{'K', WEST}},                                             1},
 };

@@ -42,7 +42,7 @@ from fleet_planner       import (
 
 SERVER_URL_DEFAULT = "ws://192.168.4.1/ws"
 # Kapma config'i AGV BAZINDA ayri dosya — bkz. agv_config.pickup_config_path.
-WAYPOINTS          = list("ABCDEFGHI")
+WAYPOINTS          = list("ABCDEFGHIJKL")
 
 
 # Tema — Material Design 800/700 tonlari (dark theme)

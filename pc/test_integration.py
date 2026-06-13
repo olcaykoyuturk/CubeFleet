@@ -222,13 +222,14 @@ def scenario_vertex_loser_wait(g: Graph) -> None:
 
 
 def scenario_edgeswap_yield(g: Graph) -> None:
-    """Head-on bitisik -> loser YIELD (yan park)."""
+    """Head-on bitisik -> loser YIELD (yan park). 4×3 grafta G↔F kenari:
+    G ve F degree-3 (yan park icin 3. komsu var), AGV_2 F'den yan park eder."""
     print("\n[08] EDGE_SWAP direct: YIELD (yan park)")
     f = FlowSim(g)
-    f.connect("AGV_1", "B")
-    f.connect("AGV_2", "E")
-    f.planner.add_mission("AGV_1", goal="E", start="B")
-    f.planner.add_mission("AGV_2", goal="B", start="E")
+    f.connect("AGV_1", "G")
+    f.connect("AGV_2", "F")
+    f.planner.add_mission("AGV_1", goal="F", start="G")
+    f.planner.add_mission("AGV_2", goal="G", start="F")
     # sim.step ile ilk tick + assertion (tick'i sim ile yapmak side-effect tutarli)
     cmds = f.sim.step()
     eq("AGV_1 NORMAL", cmds["AGV_1"].action, HopAction.NORMAL)

@@ -17,12 +17,12 @@ Kup katmani:
   once node tiklar, sonra cizgisiz kenarlardan birini secer;
   on_pick(node, side) cagrilir. `cancel_placement()` iptal eder.
 
-Grid (10 kenar — 2026-05 cyclic guncellemesi):
-    A───B───C
-        │   │
-    D───E   F
-    │   │   │
-    G───H───I
+Grid (12 kenar — 2026-06 4×3 A-L duzeni):
+    A───B───C───D
+    │       │
+    E───F───G───H
+        │
+    I───J───K───L
 """
 
 from dataclasses import dataclass, field
@@ -32,28 +32,19 @@ import tkinter as tk
 
 
 # Waypoint koordinatlari (kanvas uzerinde mantiki konum, 0-1 normalize)
-# (x, y) sol-ust koseden, x sag, y asagi
+# (x, y) sol-ust koseden, x sag, y asagi. 4×3 grid (A-L).
 _WAYPOINTS = {
-    "A": (0.10, 0.20),
-    "B": (0.40, 0.20),
-    "C": (0.70, 0.20),
-    "D": (0.10, 0.50),
-    "E": (0.40, 0.50),
-    "F": (0.70, 0.50),
-    "G": (0.10, 0.80),
-    "H": (0.40, 0.80),
-    "I": (0.70, 0.80),
+    "A": (0.12, 0.20), "B": (0.37, 0.20), "C": (0.62, 0.20), "D": (0.87, 0.20),
+    "E": (0.12, 0.50), "F": (0.37, 0.50), "G": (0.62, 0.50), "H": (0.87, 0.50),
+    "I": (0.12, 0.80), "J": (0.37, 0.80), "K": (0.62, 0.80), "L": (0.87, 0.80),
 }
 
-# Komsuluklar (waypoint_map.h ile ayni — G-H ve C-F 2026-05'te eklendi)
+# Komsuluklar (waypoint_map.h ile ayni — 2026-06 4×3 A-L duzeni, 12 kenar)
 _EDGES: List[Tuple[str, str]] = [
-    ("A", "B"), ("B", "C"),
-    ("B", "E"), ("C", "F"),
-    ("D", "E"),
-    ("D", "G"),
-    ("E", "H"),
-    ("F", "I"),
-    ("G", "H"), ("H", "I"),
+    ("A", "B"), ("B", "C"), ("C", "D"),    # ust sira
+    ("E", "F"), ("F", "G"), ("G", "H"),    # orta sira
+    ("I", "J"), ("J", "K"), ("K", "L"),    # alt sira
+    ("A", "E"), ("C", "G"), ("F", "J"),    # dikey
 ]
 
 # Yon harfleri → kanvas birim vektoru (y asagi = guney; firmware konvansiyonu)

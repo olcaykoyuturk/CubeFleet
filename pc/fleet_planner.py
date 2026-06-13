@@ -837,6 +837,13 @@ class FleetPlanner:
             if n in other_path or n in blocked or n == me.next_node:
                 continue
             degree = len(self.graph.neighbors(n))
+            # FP-18: DEAD-END (degree-1) yan park = TUZAK. Loser oraya park
+            # ederse tek cikisi me.current'a geri donus; o da genelde head-on
+            # koridoru / kazananin tuttugu node → loser sikisir, deadlock.
+            # 4×3 grafta D/H/L degree-1. Yan park GECISLI node olmali (>=2).
+            # (Eski cyclic grafta dead-end yoktu, bu durum hic olusmuyordu.)
+            if degree <= 1:
+                continue
             candidates.append((degree, n))
 
         if not candidates:

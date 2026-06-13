@@ -75,63 +75,51 @@ def expect_no_path(label, actual):
 # ----- Scenarios --------------------------------------------------------------
 
 def scenario_1_basic_shortest_paths(g: Graph):
-    """En temel: A* en kisa yolu buluyor mu?"""
+    """En temel: A* en kisa yolu buluyor mu? (4×3 A-L duzeni)"""
     print("\n[Senaryo 1] En kisa yol doğrulamaları")
-    # A → I: A-B-E-H-I = 20+38+34+18 = 110 cm
-    expect_path("A→I",  g.astar("A", "I"), ["A","B","E","H","I"], 110, g)
-    # G → F: G-H-I-F = 20+18+36 = 74 cm
-    expect_path("G→F",  g.astar("G", "F"), ["G","H","I","F"], 74, g)
-    # F → A: F-C-B-A = 38+19+20 = 77 cm
-    expect_path("F→A",  g.astar("F", "A"), ["F","C","B","A"], 77, g)
-    # G → C: G-D-E-B-C = 33+20+38+19 = 110 cm
-    expect_path("G→C",  g.astar("G", "C"), ["G","D","E","B","C"], 110, g)
+    # A → I: A-E-F-J-I = 38+20+34+20 = 112 cm (alt sira sadece F-J ile bagli)
+    expect_path("A→I",  g.astar("A", "I"), ["A","E","F","J","I"], 112, g)
+    # G → I: G-F-J-I = 20+34+20 = 74 cm
+    expect_path("G→I",  g.astar("G", "I"), ["G","F","J","I"], 74, g)
+    # D → A: D-C-B-A = 20+20+20 = 60 cm (ust sira)
+    expect_path("D→A",  g.astar("D", "A"), ["D","C","B","A"], 60, g)
+    # L → E: L-K-J-F-E = 20+20+34+20 = 94 cm
+    expect_path("L→E",  g.astar("L", "E"), ["L","K","J","F","E"], 94, g)
 
 
 def scenario_2_alternative_routes_when_blocked(g: Graph):
     """Bir kenar veya node bloklanırsa A* alternatif buluyor mu?"""
     print("\n[Senaryo 2] Alternatif rotalar (bloklu kenar/node)")
 
-    # Edge (B,E) bloklu: A → I alternatifi A-B-C-F-I
-    # = 20+19+38+36 = 113 cm
-    expect_path("A→I via (B,E) bloklu",
-                g.astar("A", "I", blocked_edges=[("B","E")]),
-                ["A","B","C","F","I"], 113, g)
+    # Edge (A,E) bloklu: A → I alternatifi A-B-C-G-F-J-I
+    # = 20+20+38+20+34+20 = 152 cm
+    expect_path("A→I via (A,E) bloklu",
+                g.astar("A", "I", blocked_edges=[("A","E")]),
+                ["A","B","C","G","F","J","I"], 152, g)
 
-    # Edge (H,I) bloklu: G → I alternatifi G-D-E-B-C-F-I
-    # = 33+20+38+19+38+36 = 184 cm
-    # veya G-H-E-B-C-F-I = 20+34+38+19+38+36 = 185 cm (1 cm fark)
-    # A* hangisini seçer? G-D-E-B-C-F-I daha kısa
-    expect_path("G→I via (H,I) bloklu",
-                g.astar("G", "I", blocked_edges=[("H","I")]),
-                ["G","D","E","B","C","F","I"], 184, g)
-
-    # Node H bloklu: G → I sadece sol+yukari uzerinden = G-D-E-B-C-F-I = 184 cm
-    expect_path("G→I via H node bloklu",
-                g.astar("G", "I", blocked_nodes=["H"]),
-                ["G","D","E","B","C","F","I"], 184, g)
-
-    # Multi-block: Edge (E,H) ve edge (C,F) bloklu, A → I
-    # Geri kalan: A-B(-C) ve A-B-E-D-G-H-I
-    # A-B-E-D-G-H-I = 20+38+20+33+20+18 = 149 cm
-    # A-B-C dead-end (C-F bloklu, B-C sadece tek yön)
-    expect_path("A→I (E,H) + (C,F) bloklu",
-                g.astar("A", "I",
-                        blocked_edges=[("E","H"), ("C","F")]),
-                ["A","B","E","D","G","H","I"], 149, g)
+    # Edge (C,G) bloklu: D → I alternatifi (ust sira soluna dolan)
+    # D-C-B-A-E-F-J-I = 20+20+20+38+20+34+20 = 172 cm
+    expect_path("D→I via (C,G) bloklu",
+                g.astar("D", "I", blocked_edges=[("C","G")]),
+                ["D","C","B","A","E","F","J","I"], 172, g)
 
 
 def scenario_3_unreachable(g: Graph):
-    """Ulasilamaz hedefler None dondursun"""
+    """Ulasilamaz hedefler None dondursun (yeni grafta dar koridorlar/dead-end)"""
     print("\n[Senaryo 3] Ulasilamaz hedefler")
 
-    # A → I but B is blocked (A's only neighbor)
-    # A icin tek komsu B → engellenirse hicbir node'a gidemez
-    expect_no_path("A→I via B bloklu",
-                   g.astar("A", "I", blocked_nodes=["B"]))
+    # F-J alt sirayi orta/ust grid'e baglayan TEK kenar. Bloklanirsa I/J/K/L
+    # erisilmez → A → I imkansiz.
+    expect_no_path("A→I via (F,J) bloklu (tek koridor)",
+                   g.astar("A", "I", blocked_edges=[("F","J")]))
 
-    # G → I ama D, H, ikisi de bloklu — G'nin tum komsulari
-    expect_no_path("G→I via D ve H bloklu",
-                   g.astar("G", "I", blocked_nodes=["D", "H"]))
+    # J alt sira kavsagi bloklu → I izole (I sadece J'ye bagli)
+    expect_no_path("A→I via J node bloklu",
+                   g.astar("A", "I", blocked_nodes=["J"]))
+
+    # H degree-1 (sadece G-H). G bloklu → H'ye ulasilamaz.
+    expect_no_path("A→H via G node bloklu (dead-end)",
+                   g.astar("A", "H", blocked_nodes=["G"]))
 
     # Hedef node'un kendisi bloklu
     expect_no_path("A→I goal I bloklu",
@@ -152,11 +140,11 @@ def scenario_4_edge_cases(g: Graph):
     # Bos engel listesi
     expect_path("A→I (bos engel)",
                 g.astar("A", "I", blocked_nodes=[], blocked_edges=[]),
-                ["A","B","E","H","I"], 110, g)
+                ["A","E","F","J","I"], 112, g)
 
-    # Edge yon-bagimsizligi: blocked_edge ("B","E") ile ("E","B") ayni
-    p1 = g.astar("A","I", blocked_edges=[("B","E")])
-    p2 = g.astar("A","I", blocked_edges=[("E","B")])
+    # Edge yon-bagimsizligi: blocked_edge ("A","E") ile ("E","A") ayni
+    p1 = g.astar("A","I", blocked_edges=[("A","E")])
+    p2 = g.astar("A","I", blocked_edges=[("E","A")])
     if p1 == p2:
         global _passed
         _passed += 1
@@ -164,73 +152,50 @@ def scenario_4_edge_cases(g: Graph):
     else:
         global _failed
         _failed += 1
-        msg = f"  ✗ blocked_edge yön bağımlı: (B,E)={p1}, (E,B)={p2}"
+        msg = f"  ✗ blocked_edge yön bağımlı: (A,E)={p1}, (E,A)={p2}"
         _failures.append(msg)
         print(msg)
 
 
 def scenario_5_real_multiagent_situations(g: Graph):
     """Multi-agent gercek durumlar — manuel rezervasyon simulasyonu.
-    Bu testler P2'nin (ConflictResolver) tasarımına ışık tutar."""
+    Yeni grafta F-J TEK koridor (alt sira ↔ orta grid) → head-on'da kritik."""
     print("\n[Senaryo 5] Multi-agent simulasyon (manuel rezervasyon)")
 
-    # ===== Durum A: Head-on, AGV_1 yuksek oncelik =====
-    # AGV_1: I → C (yuk var, direkt yol kullanır)
-    # AGV_2: C → I (yol vermesi gerek)
-    # AGV_1 plan: I-F-C (74cm) — edge (I,F) ve (F,C) rezerve, node F rezerve
-    # AGV_2 plan: same direction blocked → alternatif arar
-    print("  Senaryo A: head-on (I→C vs C→I), AGV_1 öncelikli")
-    agv1_path = g.astar("I", "C")  # AGV_1'in tutacağı direkt yol
-    print(f"    AGV_1 plani: {' → '.join(agv1_path)} ({g.path_cost(agv1_path):.0f} cm)")
-    # AGV_2 perspektifi: AGV_1'in edge (I,F) ve (F,C) bloklu, node F bloklu (AGV_1 yolunda)
-    agv2_path = g.astar("C", "I",
-                         blocked_edges=[("I","F"), ("F","C")],
-                         blocked_nodes=["F"])
-    if agv2_path:
-        print(f"    AGV_2 alternatif: {' → '.join(agv2_path)} "
-              f"({g.path_cost(agv2_path):.0f} cm) — yol var, geç beklemeden!")
-    else:
-        print("    AGV_2 alternatif YOK — wait/yield gerekli")
-
-    # ===== Durum B: Dar koridorda head-on (cycle olmayan koridor) =====
-    # Yok aslinda — graf cyclic. Ama edge (A,B) zorunlu kalsa: A dead-end
-    # A→C ile B→A: head-on at edge (A,B). A'ya gitmenin baska yolu YOK.
-    print("\n  Senaryo B: A dead-end head-on")
-    agv1_to_a = g.astar("C", "A")  # AGV_1: C → A direkt
-    print(f"    AGV_1 (C→A): {' → '.join(agv1_to_a)} ({g.path_cost(agv1_to_a):.0f} cm)")
-    # AGV_2 at A wants C — only way is through B
-    agv2_from_a = g.astar("A", "C",
-                          blocked_edges=[("A","B")])
-    if agv2_from_a is None:
-        print("    AGV_2 (A→C) edge (A,B) bloklu = YOL YOK")
-        print("    → ConflictResolver kararı: AGV_2 A'da bekler "
-              "(A dead-end olduğu icin yan park bile imkansız!)")
-
-    # ===== Durum C: Hangi alternatif daha ucuz? =====
-    # AGV_1: A → I (direkt 110 cm)
-    # AGV_2: I → A
-    # Eger ikisi de B-E koridorunu kullanırsa head-on
-    # AGV_1 priority → AGV_2 alternatif arar
-    print("\n  Senaryo C: A→I vs I→A head-on (en kısa yollar çakışıyor)")
-    agv1 = g.astar("A", "I")
-    print(f"    AGV_1 (A→I): {' → '.join(agv1)} ({g.path_cost(agv1):.0f} cm)")
-    # AGV_1'in yolundaki kenarlari blockla, AGV_2 alternatif yolu bulsun
-    # AGV_1 yolu: A-B-E-H-I; kenarlari (A,B), (B,E), (E,H), (H,I)
-    # AGV_2 alternatif: I-F-C-B-A = 36+38+19+20 = 113 cm
-    blocked = [(agv1[i], agv1[i+1]) for i in range(len(agv1)-1)]
-    agv2 = g.astar("I", "A", blocked_edges=blocked)
+    # ===== Durum A: F-J tek koridorunda head-on =====
+    # AGV_1: I → A (I-J-F-E-A), AGV_2: A → I aynı koridoru ters yönde ister.
+    print("  Senaryo A: head-on F-J koridoru (I→A vs A→I), AGV_1 öncelikli")
+    agv1 = g.astar("I", "A") or []
+    print(f"    AGV_1 (I→A): {' → '.join(agv1)} ({g.path_cost(agv1):.0f} cm)")
+    blocked = [(agv1[i], agv1[i+1]) for i in range(len(agv1) - 1)]
+    agv2 = g.astar("A", "I", blocked_edges=blocked)
     if agv2:
         print(f"    AGV_2 alternatif: {' → '.join(agv2)} "
               f"({g.path_cost(agv2):.0f} cm)")
-        diff = g.path_cost(agv2) - g.path_cost(g.astar("I","A"))
-        print(f"    → {diff:.0f} cm fazladan ama wait yok = anlık geçer")
     else:
-        # KRITIK BULGU: A degree-1 dead-end. AGV_1 (A,B)'yi kullaniyorsa
-        # AGV_2 A'ya hicbir alternatif yoldan ulasamaz. Planner: dusuk
-        # oncelikli AGV mission bitene kadar bekleyecek.
-        print("    AGV_2 alternatif YOK — A dead-end (degree=1)")
-        print("    → Planner: dusuk oncelikli AGV C civarinda bekler "
-              "(adjacency icin C-F'de degil, F-I civarinda)")
+        print("    AGV_2 alternatif YOK — F-J tek koridor, yield/wait gerekli")
+
+    # ===== Durum B: degree-1 dead-end head-on (D, H, L) =====
+    # D yalniz C'ye bagli. AGV_1 C→D, AGV_2 D→C: edge (C,D) tek yol.
+    print("\n  Senaryo B: D dead-end head-on (C↔D tek kenar)")
+    agv1_to_d = g.astar("C", "D")
+    print(f"    AGV_1 (C→D): {' → '.join(agv1_to_d)} ({g.path_cost(agv1_to_d):.0f} cm)")
+    agv2_from_d = g.astar("D", "C", blocked_edges=[("C","D")])
+    if agv2_from_d is None:
+        print("    AGV_2 (D→C) edge (C,D) bloklu = YOL YOK")
+        print("    → D degree-1 dead-end; yan park imkansiz, AGV_2 bekler")
+
+    # ===== Durum C: alt sira tek girisli (F-J) maliyet farki =====
+    print("\n  Senaryo C: A→L vs L→A (ikisi de F-J'den gecer)")
+    agv1c = g.astar("A", "L") or []
+    print(f"    AGV_1 (A→L): {' → '.join(agv1c)} ({g.path_cost(agv1c):.0f} cm)")
+    blocked_c = [(agv1c[i], agv1c[i+1]) for i in range(len(agv1c) - 1)]
+    agv2c = g.astar("L", "A", blocked_edges=blocked_c)
+    if agv2c:
+        print(f"    AGV_2 alternatif: {' → '.join(agv2c)} "
+              f"({g.path_cost(agv2c):.0f} cm)")
+    else:
+        print("    AGV_2 alternatif YOK — F-J tek koridor → yield zorunlu")
 
 
 def scenario_6_short_edge_warning(g: Graph):

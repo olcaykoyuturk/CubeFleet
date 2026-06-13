@@ -74,8 +74,9 @@ def scenario_1_single_agv(g: Graph):
     cmd = cmds["AGV_1"]
     assert_eq("action NORMAL", cmd.action, HopAction.NORMAL)
     assert_eq("from A", cmd.from_, "A")
-    assert_eq("next B", cmd.next_, "B")
-    assert_eq("after E", cmd.after_, "E")
+    # 4×3 grafta A→I yolu A-E-F-J-I
+    assert_eq("next E", cmd.next_, "E")
+    assert_eq("after F", cmd.after_, "F")
 
 
 # =============================================================================
@@ -83,27 +84,24 @@ def scenario_1_single_agv(g: Graph):
 # =============================================================================
 
 def scenario_2_headon_with_alternative(g: Graph):
-    print("\n[Senaryo 2] Head-on I->C vs C->I (ayni next=F → loser WAIT)")
+    print("\n[Senaryo 2] VERTEX ayni next=F (E->H vs J->G → loser WAIT)")
     p = FleetPlanner(g)
-    p.add_mission("AGV_1", goal="C", start="I")
-    p.add_mission("AGV_2", goal="I", start="C")
+    p.add_mission("AGV_1", goal="H", start="E")   # E-F-G-H, next F
+    p.add_mission("AGV_2", goal="G", start="J")   # J-F-G,   next F
     cmds = p.tick()
-    # AGV_1: I-F-C, AGV_2: C-F-I — ikisi de next=F (VERTEX cakismasi).
+    # Ikisi de F'ye girmek istiyor (VERTEX cakismasi).
     c1 = cmds["AGV_1"]
     c2 = cmds["AGV_2"]
     print(f"    AGV_1: {c1}")
     print(f"    AGV_2: {c2}")
-    # YENI POLITIKA: VERTEX active (ayni next_node) → loser WAIT.
-    # Mid-flight reroute YOK (race condition uretiyor). Loser current'ta
-    # bekler; AGV_1 F'den C'ye gectikten sonra AGV_2 yolu acilir → EDGE_SWAP
-    # tetiklenir (AGV_1@F gidiyor C, AGV_2@C gidiyor F) → AGV_2 yan park.
+    # VERTEX active (ayni next_node) → loser WAIT. AGV_1 F'den gecince yol acilir.
     assert_eq("AGV_1 NORMAL", c1.action, HopAction.NORMAL)
     assert_eq("AGV_1 F'ye", c1.next_, "F")
     assert_eq("AGV_2 WAIT (ayni next, beklesin)", c2.action, HopAction.WAIT)
     # Simulasyonla calistir — yine de iki AGV de hedefe varmali (deadlock yok)
     p2 = FleetPlanner(g)
-    p2.add_mission("AGV_1", goal="C", start="I")
-    p2.add_mission("AGV_2", goal="I", start="C")
+    p2.add_mission("AGV_1", goal="H", start="E")
+    p2.add_mission("AGV_2", goal="G", start="J")
     sim = FleetSimulator(p2)
     result = sim.run_until_done(max_ticks=30, deadlock_ticks=5)
     print(f"    Sim sonuc: {result}, tick={sim.tick_no}")
@@ -115,22 +113,19 @@ def scenario_2_headon_with_alternative(g: Graph):
 # =============================================================================
 
 def scenario_3_pendant_yield(g: Graph):
-    print("\n[Senaryo 3] A pendant: AGV_1 A->E, AGV_2 B'de duruyor")
+    print("\n[Senaryo 3] AGV_1 A->F (A-E-F), AGV_2 E'de — E koridoru cakismasi")
     p = FleetPlanner(g)
-    p.add_mission("AGV_1", goal="E", start="A")  # A->B->E
-    p.add_mission("AGV_2", goal="H", start="B")  # B->E->H
-    # AGV_2 zaten B'de, hedefi H; AGV_1 A->B yapmak istiyor
-    # Cakisma: AGV_1 B'ye gidiyor, AGV_2 B'de
+    p.add_mission("AGV_1", goal="F", start="A")  # A-E-F, next E
+    p.add_mission("AGV_2", goal="H", start="E")  # E-F-G-H, next F
+    # AGV_1 E'ye gidiyor, AGV_2 E'de; AGV_2 F'ye gitmek istiyor
     cmds = p.tick()
     c1 = cmds["AGV_1"]
     c2 = cmds["AGV_2"]
     print(f"    AGV_1: {c1}")
     print(f"    AGV_2: {c2}")
-    # AGV_1 derecesi 1 (A), AGV_2 derecesi 3 (B) -> AGV_1 oncelikli, AGV_2 yield
-    assert_eq("AGV_1 normal devam (A->B)", c1.action, HopAction.NORMAL)
-    assert_eq("AGV_1 B'ye gidiyor", c1.next_, "B")
-    # AGV_2 baska bir node'a yan park yapmali (C veya E degil — E AGV_1 yolunda)
-    # Ya yield ya alternative path
+    # AGV_1 oncelikli (FIFO=1) -> NORMAL A->E. AGV_2 ya devam ya bekler.
+    assert_eq("AGV_1 normal devam (A->E)", c1.action, HopAction.NORMAL)
+    assert_eq("AGV_1 E'ye gidiyor", c1.next_, "E")
     assert_in("AGV_2 action",
               c2.action, [HopAction.NORMAL, HopAction.WAIT])
 
@@ -162,20 +157,19 @@ def scenario_5_cargo_priority(g: Graph):
 # =============================================================================
 
 def scenario_6_vertex_conflict(g: Graph):
-    print("\n[Senaryo 6] VERTEX: ikisi de E'ye gidicek")
+    print("\n[Senaryo 6] VERTEX: ikisi de F'ye gidicek (E->F vs G->F)")
     p = FleetPlanner(g)
-    p.add_mission("AGV_1", goal="E", start="B")
-    p.add_mission("AGV_2", goal="E", start="D")
+    p.add_mission("AGV_1", goal="F", start="E")
+    p.add_mission("AGV_2", goal="F", start="G")
     cmds = p.tick()
     c1 = cmds["AGV_1"]
     c2 = cmds["AGV_2"]
     print(f"    AGV_1: {c1}")
     print(f"    AGV_2: {c2}")
-    # Yeni davranis: AGV_1 priority (FIFO=1) → NORMAL E'ye. AGV_2 low priority,
-    # her ikisi de E hedef oldugu icin alternatif yol bulamaz → WAIT.
-    # Kullanici manuel mudahale: AGV_2'ye baska hedef veya AGV_1 bitince devam.
+    # AGV_1 priority (FIFO=1) → NORMAL F'ye. AGV_2 low priority, ikisi de F
+    # hedef oldugu icin alternatif yol bulamaz → WAIT (manuel mudahale gerek).
     assert_eq("AGV_1 NORMAL", c1.action, HopAction.NORMAL)
-    assert_eq("AGV_1 E'ye", c1.next_, "E")
+    assert_eq("AGV_1 F'ye", c1.next_, "F")
     assert_in("AGV_2 yan/wait", c2.action, [HopAction.WAIT])
 
 
@@ -185,10 +179,10 @@ def scenario_6_vertex_conflict(g: Graph):
 
 def scenario_7_yield_return_roundtrip(g: Graph):
     print("\n[Senaryo 7] Yield-return roundtrip (multi-tick)")
-    # AGV_1: B -> E (cargo, oncelikli), AGV_2: D -> E (yan park yapacak)
+    # AGV_1: G -> F (cargo, oncelikli), AGV_2: H -> E (F koridorunda cakisir)
     p = FleetPlanner(g)
-    p.add_mission("AGV_1", goal="E", start="B", has_cargo=True)
-    p.add_mission("AGV_2", goal="C", start="D")   # AGV_2 hedefi C, yolu D-E-B-C — AGV_1 ile cakisacak
+    p.add_mission("AGV_1", goal="F", start="G", has_cargo=True)
+    p.add_mission("AGV_2", goal="E", start="H")   # H-G-F-E — AGV_1 ile cakisacak
     sim = FleetSimulator(p)
     result = sim.run_until_done(max_ticks=30, verbose=False)
     print(f"    Toplam tick: {sim.tick_no}")
@@ -260,9 +254,9 @@ def scenario_10_midflight_addition(g: Graph):
     agv2 = p.missions["AGV_2"]
     print(f"    AGV_1 pos={p.missions['AGV_1'].pos}, planned={p.missions['AGV_1'].path}")
     print(f"    AGV_2 initial path: {agv2.path}")
-    # Beklenen: path en kisa (D-E-B-C = 77cm, eskiden D-G-H-I-F-C = 145cm)
+    # Beklenen: 4×3 grafta D→C direkt kenar (D-C = 20cm)
     assert_eq("AGV_2 en kisa path secildi (soft reservations)",
-              agv2.path, ["D", "E", "B", "C"])
+              agv2.path, ["D", "C"])
 
     # Sim: conflict detection halleder, ikisi de carpismadan biter
     result = sim.run_until_done(max_ticks=30)
@@ -311,27 +305,27 @@ def scenario_11_parked_agv_as_obstacle(g: Graph):
 # =============================================================================
 
 def scenario_12_yield_side_park(g: Graph):
-    print("\n[Senaryo 12] Head-on B<->E — loser yan park (yield)")
-    # AGV_1: B -> E (path B-E), AGV_2: E -> B (path E-B). Tam head-on.
-    # AGV_1 priority (FIFO=1) → normal. AGV_2 loser, EDGE_SWAP detect,
-    # yan park dene: E komsulari [B, D, H]. B = AGV_1.next, D ve H bos.
-    # Birinde yield etmeli.
+    print("\n[Senaryo 12] Head-on G<->F — loser yan park (yield)")
+    # AGV_1: G -> F (path G-F), AGV_2: F -> G (path F-G). Tam head-on.
+    # AGV_1 priority (FIFO=1) → normal. AGV_2 loser, EDGE_SWAP detect.
+    # F komsulari [E, G, J]: G = AGV_1.next, J degree-3 ama E degree-2 (dusuk
+    # trafik) → E'ye yan park. (FP-18: dead-end H/D/L yan park adayi DEGIL.)
     p = FleetPlanner(g)
-    p.add_mission("AGV_1", goal="E", start="B")
-    p.add_mission("AGV_2", goal="B", start="E")
+    p.add_mission("AGV_1", goal="F", start="G")
+    p.add_mission("AGV_2", goal="G", start="F")
     cmds = p.tick()
     c1 = cmds["AGV_1"]
     c2 = cmds["AGV_2"]
     print(f"    AGV_1: {c1}")
     print(f"    AGV_2: {c2}")
     assert_eq("AGV_1 NORMAL", c1.action, HopAction.NORMAL)
-    assert_eq("AGV_1 E'ye", c1.next_, "E")
+    assert_eq("AGV_1 F'ye", c1.next_, "F")
     assert_eq("AGV_2 YIELD (yan park)", c2.action, HopAction.YIELD)
-    assert_in("AGV_2 park D veya H", c2.next_, ["D", "H"])
+    assert_in("AGV_2 park E veya J (gecisli)", c2.next_, ["E", "J"])
     # Simulasyon: ikisi de hedefe varmali
     p2 = FleetPlanner(g)
-    p2.add_mission("AGV_1", goal="E", start="B")
-    p2.add_mission("AGV_2", goal="B", start="E")
+    p2.add_mission("AGV_1", goal="F", start="G")
+    p2.add_mission("AGV_2", goal="G", start="F")
     sim = FleetSimulator(p2)
     result = sim.run_until_done(max_ticks=30, deadlock_ticks=5)
     print(f"    Sim sonuc: {result}, tick={sim.tick_no}")
@@ -343,28 +337,28 @@ def scenario_12_yield_side_park(g: Graph):
 # =============================================================================
 
 def scenario_13_vertex_same_target_wait(g: Graph):
-    print("\n[Senaryo 13] VERTEX ayni next — 90° yaklasimda WAIT zorunlu")
+    print("\n[Senaryo 13] VERTEX ayni next=F — 90° yaklasimda WAIT zorunlu")
     # Kritik: iki AGV ayni next_node'a 90° ile yaklasirsa sonar karsidan
     # gelmeyi gormez (forward-only). Planner WAIT vermezse carpisirlar.
-    #   AGV_1: B -> H (path B-E-H, en kisa 72cm; alternatif C-F-I-H = 111)
-    #   AGV_2: D -> B (path D-E-B, en kisa 58cm; alternatif D-G-H-E-B = 125)
-    # Ikisi de zorunlu olarak E'den gecmek istiyor → next=E hem AGV_1 hem AGV_2.
+    #   AGV_1: G -> E (path G-F-E), next=F
+    #   AGV_2: J -> H (path J-F-G-H), next=F
+    # Ikisi de zorunlu olarak F'den gecmek istiyor → next=F her ikisinde.
     p = FleetPlanner(g)
-    p.add_mission("AGV_1", goal="H", start="B")
-    p.add_mission("AGV_2", goal="B", start="D")
+    p.add_mission("AGV_1", goal="E", start="G")
+    p.add_mission("AGV_2", goal="H", start="J")
     cmds = p.tick()
     c1 = cmds["AGV_1"]
     c2 = cmds["AGV_2"]
     print(f"    AGV_1: {c1}")
     print(f"    AGV_2: {c2}")
-    assert_eq("AGV_1 NORMAL E'ye", c1.action, HopAction.NORMAL)
-    assert_eq("AGV_1 next E", c1.next_, "E")
-    assert_eq("AGV_2 WAIT — E'ye gitmiyor", c2.action, HopAction.WAIT)
-    assert_eq("AGV_2 D'de kaldi", c2.from_, "D")
-    # Simulasyon: deadlock olmamali — AGV_1 E'den H'ye gecince AGV_2 yolu acilir
+    assert_eq("AGV_1 NORMAL F'ye", c1.action, HopAction.NORMAL)
+    assert_eq("AGV_1 next F", c1.next_, "F")
+    assert_eq("AGV_2 WAIT — F'ye gitmiyor", c2.action, HopAction.WAIT)
+    assert_eq("AGV_2 J'de kaldi", c2.from_, "J")
+    # Simulasyon: deadlock olmamali — AGV_1 F'den gecince AGV_2 yolu acilir
     p2 = FleetPlanner(g)
-    p2.add_mission("AGV_1", goal="H", start="B")
-    p2.add_mission("AGV_2", goal="B", start="D")
+    p2.add_mission("AGV_1", goal="E", start="G")
+    p2.add_mission("AGV_2", goal="H", start="J")
     sim = FleetSimulator(p2)
     result = sim.run_until_done(max_ticks=30, deadlock_ticks=5)
     print(f"    Sim sonuc: {result}, tick={sim.tick_no}")
@@ -377,36 +371,29 @@ def scenario_13_vertex_same_target_wait(g: Graph):
 
 def scenario_14_after_node_lookahead(g: Graph):
     print("\n[Senaryo 14] 2-hop look-ahead: me.next == other.after_node → WAIT")
-    # Bu senaryo 03:18:58 buglarini yakaliyor:
-    #   AGV_1 mission I->A added first (path I-H-E-B-A).
-    #     AGV_1.pos=I, next=H, after=E.
-    #   AGV_2 mission C->D added (path C-B-E-D).
-    #     AGV_2 RFID:B → hopComplete B → AGV_2.pos=B, next=E, after=D.
-    #   E AGV_1'in after_node'unda. ESKI kod: AGV_2.next=E vs AGV_1.next=H
-    #   → conflict YOK → AGV_2 dispatch B>E. AGV_1 H'ye varinca, AGV_1.next=E,
-    #   simdi VERTEX detected → AGV_2 WAIT (gec, zaten yolda) → 90° carpisma.
-    # YENI kod: AGV_2 plan'inda me.next (E) in AGV_1's {H, E} → WAIT erken.
+    # 4×3 grafta:
+    #   AGV_1 I->A (path I-J-F-E-A). pos=I, next=J, after=F.
+    #   AGV_2 G->E (path G-F-E).     next=F.
+    #   F, AGV_1'in after_node'u. AGV_2.next=F, AGV_1'in {J, F} icinde → erken
+    #   WAIT (yoksa AGV_1 J'den F'ye varinca 90° F cakismasi olurdu).
     p = FleetPlanner(g)
-    p.add_mission("AGV_1", goal="A", start="I")   # path I-H-E-B-A
-    p.add_mission("AGV_2", goal="D", start="C")   # path C-B-E-D
-    # AGV_2 B'ye varmis simule et
-    p.on_hop_complete("AGV_2", "B")
+    p.add_mission("AGV_1", goal="A", start="I")   # path I-J-F-E-A
+    p.add_mission("AGV_2", goal="E", start="G")   # path G-F-E
     cmds = p.tick()
     c1 = cmds["AGV_1"]
     c2 = cmds["AGV_2"]
     print(f"    AGV_1: {c1}")
     print(f"    AGV_2: {c2}")
-    # AGV_1 priority (FIFO=1) → NORMAL I→H
+    # AGV_1 priority (FIFO=1) → NORMAL I→J
     assert_eq("AGV_1 NORMAL", c1.action, HopAction.NORMAL)
-    assert_eq("AGV_1 next H", c1.next_, "H")
-    # AGV_2 → WAIT (AGV_1.after=E ile cakisma erken yakalandi)
+    assert_eq("AGV_1 next J", c1.next_, "J")
+    # AGV_2 → WAIT (AGV_1.after=F ile cakisma erken yakalandi)
     assert_eq("AGV_2 WAIT (early lookahead)", c2.action, HopAction.WAIT)
-    assert_eq("AGV_2 B'de kaldi (dispatch yok)", c2.from_, "B")
+    assert_eq("AGV_2 G'de kaldi (dispatch yok)", c2.from_, "G")
     # Sim ile dogrula
     p2 = FleetPlanner(g)
     p2.add_mission("AGV_1", goal="A", start="I")
-    p2.add_mission("AGV_2", goal="D", start="C")
-    p2.on_hop_complete("AGV_2", "B")
+    p2.add_mission("AGV_2", goal="E", start="G")
     sim = FleetSimulator(p2)
     result = sim.run_until_done(max_ticks=30, deadlock_ticks=5)
     print(f"    Sim sonuc: {result}, tick={sim.tick_no}")

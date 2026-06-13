@@ -48,7 +48,7 @@ bool readRFIDWaypointFast(char* waypoint) {
 
     if (status != MFRC522::STATUS_OK) return false;
     char wp = (char)buffer[0];
-    if (wp < 'A' || wp > 'I') return false;
+    if (wp < 'A' || wp > 'L') return false;
 
     *waypoint = wp;
     return true;

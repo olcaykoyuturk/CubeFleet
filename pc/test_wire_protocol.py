@@ -162,9 +162,10 @@ def test_end_to_end_hopcommand():
     assert_eq("HopCommand alanlari setHop'a dogru maplendi",
               (p_msg["from"], p_msg["next"], p_msg["after"]),
               (c.from_, c.next_, c.after_))
+    # 4×3 A-L grafinde A→I yolu A-E-F-J-I → ilk hop A>E, after F
     assert_eq("from A", p_msg["from"], "A")
-    assert_eq("next B", p_msg["next"], "B")
-    assert_eq("after E", p_msg["after"], "E")
+    assert_eq("next E", p_msg["next"], "E")
+    assert_eq("after F", p_msg["after"], "F")
 
 
 def main() -> int:

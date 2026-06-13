@@ -68,7 +68,7 @@ def free_sides(g: Graph, node: str) -> List[str]:
 @dataclass
 class Cube:
     cube_id: int
-    node:    Optional[str] = None   # bulundugu waypoint ('A'-'I'), tasimada None
+    node:    Optional[str] = None   # bulundugu waypoint ('A'-'L'), tasimada None
     side:    Optional[str] = None   # node'un hangi kenarinda ('N'/'E'/'S'/'W')
     carrier: Optional[str] = None   # tasiyan AGV id'si (tasimada dolu)
 

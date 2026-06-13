@@ -189,39 +189,42 @@ class TimedSim:
         return "timeout"
 
 
-# Graf hatirlatma:  A-B-C / B-E, C-F / D-E, E-H, F-I / D-G, G-H, H-I
+# Graf hatirlatma (4×3 A-L):  A-B-C-D / E-F-G-H / I-J-K-L
+#   dikey: A-E, C-G, F-J   (alt sira I-J-K-L SADECE F-J ile bagli)
 
 def run_all_scenarios():
+    # 4×3 A-L grafta cozulebilir head-on icin GECISLI hedef secilir: G/F
+    # degree-3, yan park mumkun. (D/H/I/L degree-1 dead-end → varista sikisma.)
     # ------------------------------------------------------------ 1
-    print("\n[1] aynı anda kafa kafaya (A→I vs I→A)")
+    print("\n[1] aynı anda kafa kafaya (A→G vs G→A)")
     g, p = new_planner()
     s = TimedSim(g, p)
-    s.add("AGV_1", "I", start="A")
-    s.add("AGV_2", "A", start="I")
+    s.add("AGV_1", "G", start="A")     # A-E-F-G
+    s.add("AGV_2", "A", start="G")     # G-F-E-A
     r = s.run()
     assert_true("ikisi de hedefe vardı", r == "done", r)
     assert_true("çarpışma yok", not s.violations, s.violations[:3])
 
     # ------------------------------------------------------------ 2
-    print("\n[2] gecikmeli kafa kafaya (AGV_2, 4 tick sonra başlar)")
+    print("\n[2] gecikmeli kesişen ters yön (AGV_2, 4 tick sonra başlar)")
     g, p = new_planner()
     s = TimedSim(g, p)
-    s.add("AGV_1", "I", start="A")
+    s.add("AGV_1", "G", start="A")     # A-E-F-G
     for _ in range(4):
         s.step()
-    s.add("AGV_2", "A", start="I")
+    s.add("AGV_2", "A", start="K")     # K-J-F-E-A — E-F koridorunda kesisir
     r = s.run()
     assert_true("ikisi de hedefe vardı", r == "done", r)
     assert_true("çarpışma yok", not s.violations, s.violations[:3])
 
     # ------------------------------------------------------------ 3
-    print("\n[3] gecikmeli kesişme (ikisi de E'den geçer)")
+    print("\n[3] gecikmeli kesişme (ikisi de F'den geçer)")
     g, p = new_planner()
     s = TimedSim(g, p)
-    s.add("AGV_1", "H", start="B")     # B-E-H
+    s.add("AGV_1", "H", start="A")     # A-E-F-G-H
     for _ in range(2):
         s.step()
-    s.add("AGV_2", "B", start="D")     # D-E-B
+    s.add("AGV_2", "E", start="J")     # J-F-E
     r = s.run()
     assert_true("ikisi de hedefe vardı", r == "done", r)
     assert_true("çarpışma yok", not s.violations, s.violations[:3])
@@ -230,10 +233,10 @@ def run_all_scenarios():
     print("\n[4] cargo'lu geç katılan — ikisi de biter, çarpışma yok")
     g, p = new_planner()
     s = TimedSim(g, p)
-    s.add("AGV_1", "G", start="C")     # uzun rota
+    s.add("AGV_1", "G", start="C")     # C-G
     for _ in range(3):
         s.step()
-    s.add("AGV_2", "A", start="I", cargo=True)
+    s.add("AGV_2", "A", start="I", cargo=True)   # I-J-F-E-A
     r = s.run()
     assert_true("ikisi de hedefe vardı", r == "done", r)
     assert_true("çarpışma yok", not s.violations, s.violations[:3])
@@ -242,8 +245,8 @@ def run_all_scenarios():
     print("\n[5] KAYIP YIELD komutu → planner yeniden üretir (FP-12)")
     g, p = new_planner()
     s = TimedSim(g, p, drop_yields=1)
-    s.add("AGV_1", "C", start="E")     # E-B-C (B'den GECER, park etmez)
-    s.add("AGV_2", "E", start="B")     # B-E → kafa kafaya, loser yield
+    s.add("AGV_1", "G", start="D")     # D-C-G (winner)
+    s.add("AGV_2", "D", start="G")     # G-C-D → kafa kafaya, loser yield
     r = s.run()
     assert_true("yield kaybına rağmen ikisi de bitti", r == "done", r)
     assert_true("YIELD gerçekten kaybedildi (senaryo geçerli)", s.dropped == 1)
@@ -253,8 +256,8 @@ def run_all_scenarios():
     print("\n[5b] yol verilen AGV dönüş node'una PARK ederse (FP-17/17b)")
     g, p = new_planner()
     s = TimedSim(g, p)
-    s.add("AGV_1", "I", start="A")     # hedefi I — AGV_2'nin baslangici!
-    s.add("AGV_2", "A", start="I")
+    s.add("AGV_1", "G", start="A")     # hedefi G — AGV_2'nin baslangici!
+    s.add("AGV_2", "A", start="G")
     r = s.run()
     assert_true("park edilen dönüş node'una rağmen ikisi de bitti",
                 r == "done", r)
@@ -262,12 +265,12 @@ def run_all_scenarios():
                 not s.violations, s.violations[:3])
 
     # ------------------------------------------------------------ 6
-    print("\n[6] üç AGV merkeze (E çevresi) — watchdog'lu")
+    print("\n[6] üç AGV merkeze (F-G çevresi) — watchdog'lu")
     g, p = new_planner()
     s = TimedSim(g, p, watchdog=True)
-    s.add("AGV_1", "H", start="A")     # A-B-E-H
-    s.add("AGV_2", "B", start="D")     # D-E-B
-    s.add("AGV_3", "E", start="I")     # I-H-E
+    s.add("AGV_1", "H", start="A")     # A-E-F-G-H
+    s.add("AGV_2", "C", start="G")     # G-C
+    s.add("AGV_3", "E", start="D")     # D-C-...-E veya D-C-G-F-E
     r = s.run(max_ticks=400)
     assert_true("üçü de sonuca ulaştı", r == "done", r)
     assert_true("çarpışma yok", not s.violations, s.violations[:3])
@@ -275,16 +278,16 @@ def run_all_scenarios():
     # ------------------------------------------------------------ 7
     print("\n[7] in-flight reissue: uçuştaki karar değişmez")
     g, p = new_planner()
-    p.add_mission("AGV_1", "H", start="B")          # B-E-H
+    p.add_mission("AGV_1", "E", start="G")          # G-F-E
     c1 = p.tick()["AGV_1"]
-    assert_true("ilk dispatch NORMAL B→E",
-                c1.action == HopAction.NORMAL and c1.next_ == "E", c1)
+    assert_true("ilk dispatch NORMAL G→F",
+                c1.action == HopAction.NORMAL and c1.next_ == "F", c1)
     # hopComplete GELMEDEN cakisma yaratan ikinci mission ekle
-    p.add_mission("AGV_2", "B", start="E")          # E-B: head-on adayi
+    p.add_mission("AGV_2", "G", start="F")          # F-G: head-on adayi
     c2 = p.tick()
     assert_true("uçuştaki AGV_1 kararı AYNI kaldı (reissue)",
                 c2["AGV_1"].action == HopAction.NORMAL
-                and c2["AGV_1"].next_ == "E"
+                and c2["AGV_1"].next_ == "F"
                 and "reissue" in c2["AGV_1"].reason, c2["AGV_1"])
     assert_true("AGV_1 state bozulmadı (ACTIVE)",
                 p.missions["AGV_1"].state == MissionState.ACTIVE)
@@ -294,16 +297,16 @@ def run_all_scenarios():
     # ------------------------------------------------------------ 8
     print("\n[8] yan park kopuk AGV üstüne yapılmaz (FP-13)")
     g, p = new_planner()
-    # E'de yield edecek AGV: komsular B/D/H. D'de kopuk AGV var.
-    p.set_agv_connected("AGV_3", False, current_pos="D")
-    p.add_mission("AGV_1", "E", start="B")          # B-E (oncelikli)
-    p.add_mission("AGV_2", "B", start="E")          # E-B loser → yield
+    # F'de yield edecek AGV: komsular E/G/J. E'de kopuk AGV var → E secilmez.
+    p.set_agv_connected("AGV_3", False, current_pos="E")
+    p.add_mission("AGV_1", "F", start="G")          # G-F (oncelikli)
+    p.add_mission("AGV_2", "G", start="F")          # F-G loser → yield
     cmds = p.tick()
     y = cmds["AGV_2"]
     assert_true("loser yield/wait",
                 y.action in (HopAction.YIELD, HopAction.WAIT), y)
     if y.action == HopAction.YIELD:
-        assert_true("park kopuk AGV'nin (D) üstünde DEĞİL", y.next_ != "D", y)
+        assert_true("park kopuk AGV'nin (E) üstünde DEĞİL", y.next_ != "E", y)
 
     # ------------------------------------------------------------ 9
     print("\n[9] add_mission start=None → last_known_pos (FP-15)")
@@ -316,8 +319,8 @@ def run_all_scenarios():
     # ------------------------------------------------------------ 10
     print("\n[10] YIELDING'te pozisyon güncellemesi path'i bozmaz (FP-11)")
     g, p = new_planner()
-    p.add_mission("AGV_1", "B", start="E")
-    p.add_mission("AGV_2", "E", start="B")
+    p.add_mission("AGV_1", "F", start="G")
+    p.add_mission("AGV_2", "G", start="F")
     cmds = p.tick()
     y = cmds["AGV_2"]
     if y.action == HopAction.YIELD and y.next_:
