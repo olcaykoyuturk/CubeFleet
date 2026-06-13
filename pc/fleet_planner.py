@@ -486,21 +486,17 @@ class FleetPlanner:
                   if not m.is_done and m.agv_id not in self.disconnected_agvs]
         if not active:
             return None
-        # 1) FP-19 BLOCKER EVICTION (kullanıcı isteği) — ÖNCE dene: WAIT eden
-        #    AGV'nin TEK yolunu görevi-olmayan (DONE/IDLE) bir AGV tıkıyorsa, o
-        #    blocker'ı geçici komşuya çek → sıkışan geçer → blocker eski yerine
-        #    döner. Bu HEDEFLI çözüm; generic yield'den (adım 2) önce gelmeli —
-        #    FP-20: aksi halde generic yield, gerçek blocker'ı (DONE AGV) hiç
-        #    görmeden düşük öncelikliyi boş yere oynatır → o AGV yield-resume
-        #    salınımına girer, deadlock detect (hep-WAIT) sıfırlanır, eviction
-        #    HİÇ çalışmaz → canlı kilit (livelock). Eviction'ı öne almak hem bu
-        #    salınımı keser hem dead-end (D/H/L) tıkanmasını çözer.
+        # 1) TEK-HOP BLOCKER EVICTION (FP-19) — ÖNCE dene: WAIT eden AGV'nin
+        #    yolunu görevsiz (DONE) bir AGV tıkıyorsa, o blocker'ı bir KOMŞUYA
+        #    çek → sıkışan geçer → blocker döner. Generic yield'den (2) önce —
+        #    FP-20: aksi halde generic yield gerçek blocker'ı görmeden düşük
+        #    öncelikliyi boş yere oynatır → yield-resume salınımı → livelock.
         for m in sorted(active, key=self._priority_key):
-            yc = self._evict_blocker(m)
+            yc = self._evict_blocker(m, max_hops=1)
             if yc is not None:
                 return yc
-        # 2) Generic yield: DONE-blocker yoksa (simetrik head-on deadlock) 2+
-        #    aktif AGV'de düşük öncelikliyi yüksek olana yan-park ettir.
+        # 2) Generic yield: 2+ aktif AGV'de düşük öncelikliyi yüksek olana
+        #    yan-park ettir (simetrik head-on / tek-hop evict yetmedi).
         if len(active) >= 2:
             ordered = sorted(active, key=self._priority_key)
             winner  = ordered[0]
@@ -514,16 +510,30 @@ class FleetPlanner:
                 if yc is not None:
                     self.wait_streak[victims[0].agv_id] = 0
                     return yc
+        # 3) ÇOK-HOP eviction (FP-20b, SON ÇARE): tek-hop evict + generic yield
+        #    başarısızsa — alt-sıra dead-end tuzağı (blocker K'da, m L→I; K'nın
+        #    komşuları J,L ikisi de açılan yolda → tek-hop imkansız). Blocker
+        #    çok-hop bir refuge'e (K-J-F) çekilir; m bekler, geçer, blocker döner.
+        #    En sona alındı ki generic yield'in çözdüğü 3-AGV senaryolarını
+        #    gereksiz çok-hop sürüklemeyle bozmasın.
+        for m in sorted(active, key=self._priority_key):
+            yc = self._evict_blocker(m, max_hops=None)
+            if yc is not None:
+                return yc
         return None
 
-    def _evict_blocker(self, m: Mission) -> Optional[HopCommand]:
+    def _evict_blocker(
+        self, m: Mission, max_hops: Optional[int] = None,
+    ) -> Optional[HopCommand]:
         """m: hedefe ulaşamayan (WAIT) aktif AGV. Yolu DONE/IDLE bir AGV
-        tıkıyorsa onu geçici bir komşuya çek (return = blocker'ın eski yeri).
+        tıkıyorsa onu geçici bir refuge'e çek (return = blocker'ın eski yeri).
         Blocker yield-return mekanizmasıyla, m geçtikten sonra eski yerine döner.
 
         Bir done AGV'nin pozisyonu A*'tan ÇIKARILINCA m'nin yolu açılıyorsa o
-        AGV blocker'dır. Blocker'ı, açılan yolun ÜZERİNDE OLMAYAN boş bir
-        komşusuna park ettir (yoksa tekrar tıkar)."""
+        AGV blocker'dır. Blocker, açılan yolun ÜZERİNDE OLMAYAN bir node'a çekilir.
+        max_hops=1 → yalnız komşu (klasik FP-19); max_hops=None → çok-hop refuge
+        (FP-20b, alt-sıra dead-end tuzağı: K'nın komşuları J,L açılan yolda →
+        K-J-F gibi çok-hop gerek)."""
         if m.is_done or not m.goal or m.pos == m.goal:
             return None
         blockers = [b for b in self.missions.values()
@@ -538,20 +548,54 @@ class FleetPlanner:
             path = self.graph.astar(m.pos, m.goal, blocked_nodes=others)
             if not path or len(path) <= 1 or b.pos not in path:
                 continue
-            # b'yi açılan yol (path) DIŞINDA boş bir komşuya çek.
-            on_path = set(path)
-            for nb, _ in self.graph.neighbors(b.pos):
-                if nb in on_path:
-                    continue
-                owner = self.reservations.node_owner.get(nb)
-                if owner not in (None, b.agv_id):
-                    continue
-                yc = self._begin_yield(b, m, park=nb)
+            # b'yi açılan yol DIŞINDA bir refuge'e çek.
+            ep = self._find_eviction_refuge(b, set(path), m.pos, max_hops)
+            if ep is not None:
+                yc = self._begin_yield(b, m, path=ep)
                 if yc is not None:
-                    yc.reason = (f"evict: {b.agv_id} {b.pos}->{nb} "
+                    yc.reason = (f"evict: {b.agv_id} {b.pos}->{ep[-1]} "
                                  f"(yol ver {m.agv_id})")
                     self.wait_streak[m.agv_id] = 0
                     return yc
+        return None
+
+    def _find_eviction_refuge(
+        self, b: Mission, on_path: Set[str], stuck_pos: str,
+        max_hops: Optional[int] = None,
+    ) -> Optional[List[str]]:
+        """Blocker b'yi m'nin açılan yolundan (on_path) TAMAMEN çıkaracak en
+        yakın node'a giden retreat path'i [b.pos,...,R] bul. m'nin durduğu
+        node'a (stuck_pos) ve başka AGV'nin tuttuğu node'a girmez. Transit
+        on_path node'larından geçebilir (m rezervasyon guard ile bekler);
+        refuge'in KENDİSİ on_path dışı olmalı. max_hops verilirse o derinliğe
+        kadar arar (1 = yalnız komşu, klasik FP-19; None = sınırsız çok-hop).
+
+        DEAD-END (degree-1) refuge KABUL: FP-20 aktif-yielder'da dead-end TUZAK
+        (oraya park eden hedefine devam edemez) ama EVICTION'da blocker oraya
+        geçici çekilip m geçince GERİ DÖNER → dead-end ideal pull-off."""
+        blocked = self.reservations.blocked_nodes_for(b.agv_id)
+        forbidden = {stuck_pos} | blocked
+        prev: Dict[str, Optional[str]] = {b.pos: None}
+        depth: Dict[str, int] = {b.pos: 0}
+        queue: deque = deque([b.pos])
+        while queue:
+            cur = queue.popleft()
+            if (cur != b.pos and cur not in on_path and cur not in blocked):
+                path = [cur]
+                p = prev[cur]
+                while p is not None:
+                    path.append(p)
+                    p = prev[p]
+                path.reverse()
+                return path
+            if max_hops is not None and depth[cur] >= max_hops:
+                continue
+            for nb, _ in self.graph.neighbors(cur):
+                if nb in prev or nb in forbidden:
+                    continue
+                prev[nb] = cur
+                depth[nb] = depth[cur] + 1
+                queue.append(nb)
         return None
 
     def _plan_hop(self, m: Mission) -> HopCommand:

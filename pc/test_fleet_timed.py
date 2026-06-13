@@ -405,6 +405,38 @@ def run_all_scenarios():
     assert_true("3-AGV koridor çözüldü (done)", r == "done", r)
     assert_true("3-AGV çarpışma yok", not s.violations, s.violations[:3])
 
+    # ------------------------------------------------------------ 13
+    print("\n[13] FP-20b çok-hop eviction: dead-end'de sıkışan + park'lı blocker")
+    # SAHA RAPORU: AGV_1 L'de (dead-end), L→I görevi. AGV_2 K'da görevini bitirmiş
+    # (DONE, park). L'nin tek çıkışı K dolu → "no reachable path". Tek-hop eviction
+    # AGV_2'yi K'dan çekemez (K'nın komşuları J,L ikisi de AGV_1'in açılan yolunda)
+    # → eskiden "manuel müdahale gerek" sonsuz döngüsü. FP-20b: çok-hop eviction
+    # AGV_2'yi K-J-F'e çeker, AGV_1 L-K-J-I geçer, AGV_2 K'ya döner.
+    g, p = new_planner()
+    s = TimedSim(g, p, watchdog=True)
+    s.add("AGV_2", "K", start="K")   # K'da DONE (blocker)
+    s.add("AGV_1", "I", start="L")   # L dead-end'de sıkışma
+    r = s.run(max_ticks=300)
+    assert_true("dead-end eviction çözüldü (done)", r == "done", r)
+    assert_true("çarpışma yok", not s.violations, s.violations[:3])
+    assert_true("AGV_1 hedefte (I)", p.missions["AGV_1"].pos == "I",
+                p.missions["AGV_1"].pos)
+    assert_true("AGV_2 eski yerine döndü (K)", p.missions["AGV_2"].pos == "K",
+                p.missions["AGV_2"].pos)
+
+    # ------------------------------------------------------------ 13b
+    print("\n[13b] çok-hop eviction tek-hop/generic yield'i bozmamalı")
+    # Tek-hop eviction VEYA generic yield'in çözdüğü senaryolar çok-hop'a DÜŞMEZ
+    # (sıra: tek-hop evict → generic yield → çok-hop evict). Blocker@J, AGV_1 F→K:
+    # J'nin komşusu I (dead-end ama açılan yol DIŞI) → tek-hop eviction yeterli.
+    g, p = new_planner()
+    s = TimedSim(g, p, watchdog=True)
+    s.add("AGV_2", "J", start="J")   # J'de DONE
+    s.add("AGV_1", "K", start="F")   # F→K, J blocker
+    r = s.run(max_ticks=200)
+    assert_true("tek-hop eviction yeterli (done)", r == "done", r)
+    assert_true("çarpışma yok", not s.violations, s.violations[:3])
+
 
 def main() -> int:
     run_all_scenarios()
