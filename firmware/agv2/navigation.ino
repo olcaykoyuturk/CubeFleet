@@ -732,12 +732,13 @@ static const char* navStateName(NavState s) {
     }
 }
 
-void navCommandHop(char from, char next, char after, char goal) {
+void navCommandHop(char from, char next, char after, char after2, char goal) {
     char dlog[128];
     snprintf(dlog, sizeof(dlog),
-             "[HOP-IN] from=%c next=%c after=%c goal=%c | AGV=%c state=%s "
+             "[HOP-IN] from=%c next=%c after=%c after2=%c goal=%c | AGV=%c state=%s "
              "navPath[%d/%d]=%c",
-             from, next, (after != 0) ? after : '-', (goal != 0) ? goal : '-',
+             from, next, (after != 0) ? after : '-',
+             (after2 != 0) ? after2 : '-', (goal != 0) ? goal : '-',
              currentWaypoint, navStateName(navState),
              navPathIndex, navPathLength,
              (navPathLength > 0 && navPathIndex < navPathLength)
@@ -768,18 +769,24 @@ void navCommandHop(char from, char next, char after, char goal) {
                     || navState == NAV_AT_JUNCTION);
 
     if (sameHop && moving) {
+        // Continuous update — after + after2'yi guncelle (3-hop look-ahead).
         int afterIdx = navPathIndex + 1;
         if (after != 0 && afterIdx < MAX_PATH_LENGTH) {
             navPath[afterIdx] = after;
             if (afterIdx >= navPathLength) navPathLength = afterIdx + 1;
+            int after2Idx = afterIdx + 1;
+            if (after2 != 0 && after2Idx < MAX_PATH_LENGTH) {
+                navPath[after2Idx] = after2;
+                if (after2Idx >= navPathLength) navPathLength = after2Idx + 1;
+            }
         } else {
             navPathLength  = navPathIndex + 1;
         }
         targetWaypoint = (goal != 0) ? goal
-                                     : ((after != 0) ? after : next);
+                       : ((after2 != 0) ? after2 : ((after != 0) ? after : next));
         char buf[48];
-        snprintf(buf, sizeof(buf), "Hop after=%c (kesintisiz)",
-                 (after != 0) ? after : '-');
+        snprintf(buf, sizeof(buf), "Hop after=%c after2=%c (kesintisiz)",
+                 (after != 0) ? after : '-', (after2 != 0) ? after2 : '-');
         sendLog(buf);
         return;
     }
@@ -805,17 +812,24 @@ void navCommandHop(char from, char next, char after, char goal) {
     if (after != 0) {
         navPath[2]    = after;
         navPathLength = 3;
+        if (after2 != 0) {
+            navPath[3]    = after2;
+            navPathLength = 4;
+        }
     }
     navPathIndex   = 1;
     targetWaypoint = (goal != 0) ? goal
-                                 : ((after != 0) ? after : next);
+                   : ((after2 != 0) ? after2 : ((after != 0) ? after : next));
     isTarget       = true;
 
     nav.lastReadWP     = currentWaypoint;
     nav.rfidDetectedWP = 0;
 
     char buf[64];
-    if (after != 0) {
+    if (after2 != 0) {
+        snprintf(buf, sizeof(buf), "Hop: %c -> %c -> %c -> %c (goal=%c)",
+                 from, next, after, after2, (goal != 0) ? goal : '-');
+    } else if (after != 0) {
         snprintf(buf, sizeof(buf), "Hop: %c -> %c -> %c (goal=%c)",
                  from, next, after, (goal != 0) ? goal : '-');
     } else {

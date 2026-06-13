@@ -377,20 +377,22 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
     }
     // ===== Multi-AGV Planner mesajlari (PC -> AGV) =====
     else if (type == "setHop") {
-        // PC planner'dan gelen 2-hop look-ahead emir.
-        // payload: {type:"setHop", agvId, from, next, after?, goal?}
-        // AGV from'dan next'e cizgi takibiyle gider, kavsakta after icin yon doner.
-        // goal: mission nihai hedefi — firmware "Hedefe ulasildi" kontrolu buna gore.
+        // PC planner'dan gelen 3-hop look-ahead emir.
+        // payload: {type:"setHop", agvId, from, next, after?, after2?, goal?}
+        // AGV from'dan next'e cizgi takibiyle gider, kavsakta after/after2 icin
+        // yon doner. goal: mission nihai hedefi — "Hedefe ulasildi" kontrolu buna.
+        // message AYNEN forward edilir (after2 dahil her alan otomatik gecer).
         String agvId = doc["agvId"].as<String>();
         int idx = findAGVById(agvId);
         if (idx >= 0 && agvs[idx].connected) {
             ws.text(agvs[idx].clientId, message);
-            const char* fromS  = doc["from"]  | "?";
-            const char* nextS  = doc["next"]  | "?";
-            const char* afterS = doc["after"] | "-";
-            const char* goalS  = doc["goal"]  | "-";
-            Serial.printf("setHop %s: %s>%s>%s goal=%s\n",
-                          agvId.c_str(), fromS, nextS, afterS, goalS);
+            const char* fromS   = doc["from"]   | "?";
+            const char* nextS   = doc["next"]   | "?";
+            const char* afterS  = doc["after"]  | "-";
+            const char* after2S = doc["after2"] | "-";
+            const char* goalS   = doc["goal"]   | "-";
+            Serial.printf("setHop %s: %s>%s>%s>%s goal=%s\n",
+                          agvId.c_str(), fromS, nextS, afterS, after2S, goalS);
         }
     }
     else if (type == "clearMission") {

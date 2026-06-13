@@ -127,8 +127,9 @@ void navCommandSetPID(float kp, float ki, float kd);
 void navCommandSetSpeed(int speed);
 void navCommandCalibrate();
 bool navCommandApplyCalibration(const int* minVals, const int* maxVals);
-// Multi-AGV planner: 2-hop look-ahead emir + mission goal (REACHED check).
-void navCommandHop(char from, char next, char after, char goal = 0);
+// Multi-AGV planner: 3-hop look-ahead emir + mission goal (REACHED check).
+// after2 navPath buffer'i derinlestirir → WS gecikmesinde AGV beklemez.
+void navCommandHop(char from, char next, char after, char after2 = 0, char goal = 0);
 // Kup yonune don (NAV_IDLE'da): 'N'/'E'/'S'/'W'. O yonde cizgi varsa sensorlu,
 // yoksa OGRENILEN ortalama sureyle zamanli 90° donus. Bitince faceComplete.
 void navCommandFaceDir(char dirChar);

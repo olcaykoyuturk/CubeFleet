@@ -106,24 +106,38 @@ class Mission:
         return self.path[idx + 2] if idx + 2 < len(self.path) else None
 
     @property
+    def after2_node(self) -> Optional[str]:
+        """Path uzerinde pos'tan 3 sonraki node (3-hop look-ahead). Firmware'in
+        navPath buffer'ini derinlestirir → WS gecikmesinde AGV path-sonu
+        node'unda beklemeden devam eder."""
+        if self.pos not in self.path:
+            return None
+        idx = self.path.index(self.pos)
+        return self.path[idx + 3] if idx + 3 < len(self.path) else None
+
+    @property
     def is_done(self) -> bool:
         return self.pos == self.goal
 
 
 @dataclass
 class HopCommand:
-    """AGV'ye gonderilecek emir. WS uzerinden `setHop` mesajiyla yollanir."""
+    """AGV'ye gonderilecek emir. WS uzerinden `setHop` mesajiyla yollanir.
+    after2_: 3-hop look-ahead (yalniz NORMAL dispatch'te dolu; yield/wait/park
+    kisa hop'larda None)."""
     agv_id: str
     action: HopAction
     from_:  str
     next_:  Optional[str] = None
     after_: Optional[str] = None
+    after2_: Optional[str] = None
     reason: str           = ""
 
     def __repr__(self) -> str:
         n = self.next_ or "-"
         a = self.after_ or "-"
-        return f"<Hop {self.agv_id} {self.action.value} {self.from_}>{n}>{a} ({self.reason})>"
+        a2 = self.after2_ or "-"
+        return f"<Hop {self.agv_id} {self.action.value} {self.from_}>{n}>{a}>{a2} ({self.reason})>"
 
 
 @dataclass
@@ -554,6 +568,7 @@ class FleetPlanner:
             from_  = m.current,
             next_  = m.next_node,
             after_ = m.after_node,
+            after2_ = m.after2_node,
             reason = reason,
         )
 

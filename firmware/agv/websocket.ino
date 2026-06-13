@@ -112,20 +112,22 @@ static void handleServerMessage(uint8_t* payload, size_t length) {
         return;
     }
 
-    // --- Multi-AGV Planner: setHop (2-hop look-ahead emir) ---
-    // payload: {type:"setHop", agvId, from, next, after?, goal?}
-    // goal: mission nihai hedefi (REACHED check'i icin); after lokal hop devam.
+    // --- Multi-AGV Planner: setHop (3-hop look-ahead emir) ---
+    // payload: {type:"setHop", agvId, from, next, after?, after2?, goal?}
+    // goal: mission nihai hedefi (REACHED check'i icin); after/after2 lokal devam.
     if (strcmp(type, "setHop") == 0) {
-        const char* from  = doc["from"];
-        const char* next_ = doc["next"];
-        const char* after = doc["after"];   // null olabilir
-        const char* goal  = doc["goal"];    // null olabilir
+        const char* from   = doc["from"];
+        const char* next_  = doc["next"];
+        const char* after  = doc["after"];    // null olabilir
+        const char* after2 = doc["after2"];   // null olabilir (3-hop)
+        const char* goal   = doc["goal"];     // null olabilir
         if (from && from[0] && next_ && next_[0]) {
             navCommandHop(
                 from[0],
                 next_[0],
-                (after && after[0]) ? after[0] : 0,
-                (goal  && goal[0])  ? goal[0]  : 0
+                (after  && after[0])  ? after[0]  : 0,
+                (after2 && after2[0]) ? after2[0] : 0,
+                (goal   && goal[0])   ? goal[0]   : 0
             );
         }
         return;

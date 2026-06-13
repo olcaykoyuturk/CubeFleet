@@ -1975,7 +1975,7 @@ class AGVControlApp(ctk.CTk):
         # KALICI stall. Eski kayit (>3 sn) gecersiz sayilir → watchdog nabzi
         # ayni komutu yeniden gonderir (firmware idempotent: ayni hop'u
         # yurutuyorsa sameHop/race-guard ile zararsiz).
-        key = (c.from_, c.next_, c.after_)
+        key = (c.from_, c.next_, c.after_, c.after2_)
         prev = self._last_dispatched_hop.get(agv_id)
         now = time.time()
         if prev is not None and prev[0] == key and now - prev[1] < 3.0:
@@ -1986,13 +1986,15 @@ class AGVControlApp(ctk.CTk):
         mpath = " -> ".join(m.path) if m else "(yok)"
         mgoal = m.goal if m else None
         after_s = c.after_ or "-"
+        after2_s = c.after2_ or "-"
         self._add_log(LogEvent(
             agvId=agv_id,
-            message=f"[PLN] dispatch {c.from_}>{c.next_}>{after_s} "
+            message=f"[PLN] dispatch {c.from_}>{c.next_}>{after_s}>{after2_s} "
                     f"goal={mgoal} ({c.reason}) | path: {mpath}",
             time_ms=0, wall_time=time.time(),
         ))
-        self.client.set_hop(agv_id, c.from_, c.next_, c.after_, goal=mgoal)
+        self.client.set_hop(agv_id, c.from_, c.next_, c.after_,
+                            after2=c.after2_, goal=mgoal)
 
     def _planner_on_hop_complete(self, agv_id: str, node: str) -> None:
         """AGV'den hopComplete event'i geldi. Planner'i guncelle ve auto-tick

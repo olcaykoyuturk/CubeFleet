@@ -402,10 +402,13 @@ class AGVClient:
 
     # ---- Multi-AGV planner WS API ----
     def set_hop(self, agv_id: str, from_: str, next_: str,
-                after: Optional[str] = None,
-                goal:  Optional[str] = None) -> bool:
-        """2-hop look-ahead emir. AGV `from_`'dan `next_`'e gider, kavsakta
-        `after` icin yon belirler ve durmaz. `after` None ise next'te park.
+                after:  Optional[str] = None,
+                after2: Optional[str] = None,
+                goal:   Optional[str] = None) -> bool:
+        """3-hop look-ahead emir. AGV `from_`'dan `next_`'e gider, kavsakta
+        `after`/`after2` icin yon belirler ve durmaz. `after`/`after2` None ise
+        navPath o kadar uzun olmaz (path sonu). 3. hop (`after2`), WS gecikmesi
+        olsa bile AGV'nin path-sonu node'unda beklemeden devam etmesini saglar.
 
         `goal`: mission'un nihai hedefi. AGV firmware "Hedefe ulasildi"
         kontrolunde local hop after yerine bunu kullanir; AGV ara node'da
@@ -418,6 +421,8 @@ class AGVClient:
         }
         if after:
             payload["after"] = after
+        if after2:
+            payload["after2"] = after2
         if goal:
             payload["goal"] = goal
         return self.send_raw(payload)

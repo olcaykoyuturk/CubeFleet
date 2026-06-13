@@ -70,20 +70,24 @@ def make_capturing_client() -> tuple:
 
 
 def test_set_hop_golden():
-    print("\n[1] set_hop golden govde")
+    print("\n[1] set_hop golden govde (3-hop look-ahead)")
     client, cap = make_capturing_client()
-    client.set_hop("AGV_1", "A", "B", "E", goal="I")
+    client.set_hop("AGV_1", "A", "B", "E", after2="H", goal="I")
     p = cap[-1]
     assert_eq("tam govde",
               p,
               {"type": "setHop", "agvId": "AGV_1",
-               "from": "A", "next": "B", "after": "E", "goal": "I"})
+               "from": "A", "next": "B", "after": "E", "after2": "H",
+               "goal": "I"})
     # Firmware'in parse ettigi alan adlari (websocket.ino doc["from"]/["next"]/...)
     assert_eq("alan adlari kume",
               set(p.keys()),
-              {"type", "agvId", "from", "next", "after", "goal"})
+              {"type", "agvId", "from", "next", "after", "after2", "goal"})
     assert_true("'to' alani YOK (yanlis sozlesme)", "to" not in p)
     assert_true("'action' alani YOK (yanlis sozlesme)", "action" not in p)
+    # after2 None ise govdeden cikarilir (firmware opsiyonel okur)
+    client.set_hop("AGV_1", "A", "B", "E", goal="I")
+    assert_true("after2 None -> govdede yok", "after2" not in cap[-1])
 
 
 def test_set_hop_optional_fields():
@@ -157,15 +161,17 @@ def test_end_to_end_hopcommand():
     assert_eq("planner NORMAL hop", c.action, HopAction.NORMAL)
     # agv_control._planner_dispatch_hop'un yaptigini birebir yansit:
     client, cap = make_capturing_client()
-    client.set_hop(c.agv_id, c.from_, c.next_, c.after_, goal="I")
+    client.set_hop(c.agv_id, c.from_, c.next_, c.after_,
+                   after2=c.after2_, goal="I")
     p_msg = cap[-1]
     assert_eq("HopCommand alanlari setHop'a dogru maplendi",
-              (p_msg["from"], p_msg["next"], p_msg["after"]),
-              (c.from_, c.next_, c.after_))
-    # 4×3 A-L grafinde A→I yolu A-E-F-J-I → ilk hop A>E, after F
+              (p_msg["from"], p_msg["next"], p_msg["after"], p_msg.get("after2")),
+              (c.from_, c.next_, c.after_, c.after2_))
+    # 4×3 A-L grafinde A→I yolu A-E-F-J-I → ilk hop A>E, after F, after2 J (3-hop)
     assert_eq("from A", p_msg["from"], "A")
     assert_eq("next E", p_msg["next"], "E")
     assert_eq("after F", p_msg["after"], "F")
+    assert_eq("after2 J (3-hop look-ahead)", p_msg["after2"], "J")
 
 
 def main() -> int:

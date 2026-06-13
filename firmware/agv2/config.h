@@ -34,7 +34,11 @@
 #define LINE_THRESHOLD   600   // Kalibre sensör eşiği (0-1000 arası)
 
 // ===== WebSocket Zamanlaması =====
-#define STATUS_INTERVAL   500   // Durum paketi gönderme aralığı (ms)
+// 500 -> 1000: multi-AGV'de status broadcast (server textAll, her AGV) setHop
+// forward'ini geciktiriyordu (AGV path-sonu node'larinda komut bekleyip
+// duruyordu). 1 sn UI/sensor icin yeterli; pozisyon zaten hopComplete'ten
+// gelir. WS kuyrugunu hafifletip setHop gecikmesini dusurur.
+#define STATUS_INTERVAL  1000   // Durum paketi gönderme aralığı (ms)
 #define PING_INTERVAL    5000   // Canlı kalma ping aralığı (ms)
 
 // ===== Varsayılan PID Değerleri =====
