@@ -514,14 +514,20 @@ class FleetPlanner:
         if m.inflight is not None and m.pos == m.inflight[0]:
             nxt = m.inflight[1]
             after = None
+            after2 = None
             if m.pos in m.path:
                 i = m.path.index(m.pos)
-                if (i + 1 < len(m.path) and m.path[i + 1] == nxt
-                        and i + 2 < len(m.path)):
-                    after = m.path[i + 2]
+                if i + 1 < len(m.path) and m.path[i + 1] == nxt:
+                    # 3-hop look-ahead reissue'da da KORUNMALI; yoksa her
+                    # reissue (her hop) after2'yi silip navPath'i kisaltir →
+                    # AGV path-sonu node'unda yine bekler (3-hop iptal olur).
+                    if i + 2 < len(m.path):
+                        after = m.path[i + 2]
+                    if i + 3 < len(m.path):
+                        after2 = m.path[i + 3]
             return HopCommand(
                 agv_id=m.agv_id, action=HopAction.NORMAL,
-                from_=m.pos, next_=nxt, after_=after,
+                from_=m.pos, next_=nxt, after_=after, after2_=after2,
                 reason="enroute (reissue)",
             )
 
