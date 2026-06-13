@@ -77,31 +77,30 @@ def expect_no_path(label, actual):
 def scenario_1_basic_shortest_paths(g: Graph):
     """En temel: A* en kisa yolu buluyor mu? (4×3 A-L duzeni)"""
     print("\n[Senaryo 1] En kisa yol doğrulamaları")
-    # A → I: A-E-F-J-I = 38+20+34+20 = 112 cm (alt sira sadece F-J ile bagli)
-    expect_path("A→I",  g.astar("A", "I"), ["A","E","F","J","I"], 112, g)
-    # G → I: G-F-J-I = 20+34+20 = 74 cm
-    expect_path("G→I",  g.astar("G", "I"), ["G","F","J","I"], 74, g)
-    # D → A: D-C-B-A = 20+20+20 = 60 cm (ust sira)
-    expect_path("D→A",  g.astar("D", "A"), ["D","C","B","A"], 60, g)
-    # L → E: L-K-J-F-E = 20+20+34+20 = 94 cm
-    expect_path("L→E",  g.astar("L", "E"), ["L","K","J","F","E"], 94, g)
+    # Tum kenarlar 30 cm (esit-aralikli grid). A → I: A-E-F-J-I = 4×30 = 120
+    expect_path("A→I",  g.astar("A", "I"), ["A","E","F","J","I"], 120, g)
+    # G → I: G-F-J-I = 3×30 = 90 cm
+    expect_path("G→I",  g.astar("G", "I"), ["G","F","J","I"], 90, g)
+    # D → A: D-C-B-A = 3×30 = 90 cm (ust sira)
+    expect_path("D→A",  g.astar("D", "A"), ["D","C","B","A"], 90, g)
+    # L → E: L-K-J-F-E = 4×30 = 120 cm
+    expect_path("L→E",  g.astar("L", "E"), ["L","K","J","F","E"], 120, g)
 
 
 def scenario_2_alternative_routes_when_blocked(g: Graph):
     """Bir kenar veya node bloklanırsa A* alternatif buluyor mu?"""
     print("\n[Senaryo 2] Alternatif rotalar (bloklu kenar/node)")
 
-    # Edge (A,E) bloklu: A → I alternatifi A-B-C-G-F-J-I
-    # = 20+20+38+20+34+20 = 152 cm
+    # Edge (A,E) bloklu: A → I alternatifi A-B-C-G-F-J-I = 6×30 = 180 cm
     expect_path("A→I via (A,E) bloklu",
                 g.astar("A", "I", blocked_edges=[("A","E")]),
-                ["A","B","C","G","F","J","I"], 152, g)
+                ["A","B","C","G","F","J","I"], 180, g)
 
     # Edge (C,G) bloklu: D → I alternatifi (ust sira soluna dolan)
-    # D-C-B-A-E-F-J-I = 20+20+20+38+20+34+20 = 172 cm
+    # D-C-B-A-E-F-J-I = 7×30 = 210 cm
     expect_path("D→I via (C,G) bloklu",
                 g.astar("D", "I", blocked_edges=[("C","G")]),
-                ["D","C","B","A","E","F","J","I"], 172, g)
+                ["D","C","B","A","E","F","J","I"], 210, g)
 
 
 def scenario_3_unreachable(g: Graph):
@@ -140,7 +139,7 @@ def scenario_4_edge_cases(g: Graph):
     # Bos engel listesi
     expect_path("A→I (bos engel)",
                 g.astar("A", "I", blocked_nodes=[], blocked_edges=[]),
-                ["A","E","F","J","I"], 112, g)
+                ["A","E","F","J","I"], 120, g)
 
     # Edge yon-bagimsizligi: blocked_edge ("A","E") ile ("E","A") ayni
     p1 = g.astar("A","I", blocked_edges=[("A","E")])
