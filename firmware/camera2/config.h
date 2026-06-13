@@ -108,15 +108,15 @@
 // Bunun icin /arm/home endpoint'i kullanilir (armGoHome fonksiyonu).
 #define SERVO_BASE_MIN       0
 #define SERVO_BASE_MAX     180
-#define SERVO_BASE_HOME    100
+#define SERVO_BASE_HOME     90     // AGV_2 kol kalibrasyonu (camera/'dan farkli)
 
 #define SERVO_SHOULDER_MIN   0
 #define SERVO_SHOULDER_MAX 180     // 120 -> 180 genisletildi (carpisma korumasi kinematik modelden)
-#define SERVO_SHOULDER_HOME 170    // park konumu - HOME sirasinda ILK ayarlanir
+#define SERVO_SHOULDER_HOME 180    // AGV_2: park konumu - HOME sirasinda ILK ayarlanir
 
 #define SERVO_ELBOW_MIN      0     // TEST: limit kaldirildi (4->0)
 #define SERVO_ELBOW_MAX    180     // TEST: limit kaldirildi (153->180)
-#define SERVO_ELBOW_HOME    40     // shoulder hazir olunca ALCAK (final)
+#define SERVO_ELBOW_HOME    31     // AGV_2: shoulder hazir olunca ALCAK (final)
 #define SERVO_ELBOW_CLEAR  100     // HOME oncesi clearance: kol AGV ustunde,
                                    // elbow alcaktayken shoulder donerse sikisir;
                                    // once elbow buraya YUKSELIR, shoulder oturur,
@@ -124,7 +124,7 @@
 
 #define SERVO_GRIPPER_MIN    0
 #define SERVO_GRIPPER_MAX  180     // TEST: limit kaldirildi (160->180)
-#define SERVO_GRIPPER_HOME  80
+#define SERVO_GRIPPER_HOME 110     // AGV_2 kol kalibrasyonu
 
 // -----------------------------------------------------------------------------
 // BOOT (soft-start) pozisyonu — kol GUC KESIKKEN yer cekimiyle nerede DURUYORSA

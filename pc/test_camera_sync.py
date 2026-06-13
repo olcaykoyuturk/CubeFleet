@@ -88,6 +88,17 @@ def main() -> int:
     assert_true("config.h satır sayısı aynı", len(c1) == len(c2),
                 (len(c1), len(c2)))
     ident_keys = ("#define CAM_ID", "#define CAM_IP_OCT_4")
+    # AGV_2'nin kolu fiziksel olarak FARKLI — bu mekanik kalibrasyon define'lari
+    # camera2'de kasten farkli olabilir (per-kol kimlik, CAM_ID gibi). Diger her
+    # sey birebir ayni kalmali. (pickup_config_<AGV>.json'daki PC tarafi ayrim
+    # ile ayni mantik.)
+    arm_calib_keys = (
+        "#define SERVO_BASE_HOME", "#define SERVO_SHOULDER_HOME",
+        "#define SERVO_ELBOW_HOME", "#define SERVO_GRIPPER_HOME",
+        "#define SERVO_ELBOW_CLEAR",
+        "#define SERVO_BASE_BOOT", "#define SERVO_SHOULDER_BOOT",
+        "#define SERVO_ELBOW_BOOT", "#define SERVO_GRIPPER_BOOT",
+    )
     bad = []
     cam2_id_ok = cam2_ip_ok = False
     for i, (l1, l2) in enumerate(zip(c1, c2), start=1):
@@ -99,8 +110,12 @@ def main() -> int:
             if "#define CAM_IP_OCT_4" in l2 and "51" in l2.split("//")[0]:
                 cam2_ip_ok = True
             continue
+        # Kol mekanik kalibrasyonu (HOME/CLEAR/BOOT): AGV_2'de farkli olabilir
+        if any(k in l1 and k in l2 for k in arm_calib_keys):
+            continue
         bad.append(f"satır {i}: {l1!r} ↔ {l2!r}")
-    assert_true("config.h yalnız kimlik satırlarında farklı", not bad, bad[:3])
+    assert_true("config.h yalnız kimlik + kol kalibrasyon satırlarında farklı",
+                not bad, bad[:3])
     assert_true("camera2 CAM_ID = CAM_2", cam2_id_ok)
     assert_true("camera2 CAM_IP_OCT_4 = 51", cam2_ip_ok)
 
