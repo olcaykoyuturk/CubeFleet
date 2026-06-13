@@ -163,17 +163,6 @@ static void centerOnLine() {
 // Tek dönüş motoru (90° / 180° hepsi)
 // =============================================================================
 
-// ÖĞRENİLEN 90° DÖNÜŞ SÜRESİ — her başarılı SENSÖRLÜ 90° segment ölçülür,
-// EMA (%70 eski + %30 yeni) ile güncellenir. faceDir bunun üzerinden çizgisiz
-// (küp yönü) dönüş yapar. Default yalnız ilk sensörlü dönüşe kadar geçerli.
-static unsigned long avgTurn90Ms = TIMED_TURN90_DEFAULT_MS;
-
-static void updateTurn90Avg(unsigned long measuredMs) {
-    if (measuredMs < TIMED_TURN90_MIN_MS || measuredMs > TIMED_TURN90_MAX_MS)
-        return;   // sahte/takılmalı ölçüm — ortalamayı kirletme
-    avgTurn90Ms = (avgTurn90Ms * 7 + measuredMs * 3) / 10;
-}
-
 // Spin turn: exitLine + findLine adımları toplam 'segments' kez tekrar.
 // 90° → 1 segment, 180° (varsa ara çizgi) → 2 segment.
 // headingDelta: heading update miktarı (-1 = sol 90°, +1 = sağ 90°, +2 = 180°)
@@ -182,7 +171,6 @@ static bool executeSpinTurn(bool turnRight, int segments, int headingDelta,
     motorStop(); webSocketLoop(); delay(50);
 
     for (int s = 0; s < segments; s++) {
-        unsigned long segStart = millis();
         if (!sensorExitLine(turnRight)) {
             motorStop();
             char buf[40]; snprintf(buf, sizeof(buf), "%s: Cikis-%d TIMEOUT", tag, s + 1);
@@ -195,8 +183,6 @@ static bool executeSpinTurn(bool turnRight, int segments, int headingDelta,
             sendLog(buf);
             return false;
         }
-        // Başarılı 90° segment — süresini öğrenilen ortalamaya işle
-        updateTurn90Avg(millis() - segStart);
     }
 
     centerOnLine();
@@ -205,15 +191,14 @@ static bool executeSpinTurn(bool turnRight, int segments, int headingDelta,
     return true;
 }
 
-// ZAMANLI 90° dönüş — çizgi OLMAYAN yöne (küp tarafı). Öğrenilen ortalama
-// süre kadar döner, sonra durur. STOP her an işler (navCommandStop
-// navState'i IDLE yapar → döngü kırılır). Dönüşte biriken küçük açı hatası
-// kalıcı DEĞİL: bir sonraki sensörlü dönüş (setHop ilk dönüşü) çizgiye
-// kilitlenirken hatayı sıfırlar.
+// ZAMANLI 90° dönüş — çizgi OLMAYAN yöne (küp tarafı). SABİT TIMED_TURN90_MS
+// kadar döner, sonra durur. STOP her an işler (navCommandStop navState'i IDLE
+// yapar → döngü kırılır). Dönüşte biriken küçük açı hatası kalıcı DEĞİL: bir
+// sonraki sensörlü dönüş (setHop ilk dönüşü) çizgiye kilitlenirken sıfırlar.
 static bool timedTurn90(bool turnRight) {
     motorStop(); webSocketLoop(); delay(50);
     unsigned long start = millis();
-    while (millis() - start < avgTurn90Ms) {
+    while (millis() - start < TIMED_TURN90_MS) {
         webSocketLoop();
         if (navState == NAV_IDLE) { motorStop(); return false; }   // STOP
         turnRight ? motorTurnRight(TURN_SPEED) : motorTurnLeft(TURN_SPEED);
@@ -269,9 +254,9 @@ static void executeFaceDir(Heading target) {
     int  segments  = (diff == 2) ? 2 : 1;
 
     char buf[64];
-    snprintf(buf, sizeof(buf), "faceDir: %s -> %s (%d seg, avg90=%lums)",
+    snprintf(buf, sizeof(buf), "faceDir: %s -> %s (%d seg, timed=%dms)",
              headingToStr(heading), headingToStr(target),
-             segments, avgTurn90Ms);
+             segments, TIMED_TURN90_MS);
     sendLog(buf);
 
     for (int s = 0; s < segments; s++) {
