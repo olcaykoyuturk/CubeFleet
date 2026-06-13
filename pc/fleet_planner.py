@@ -29,6 +29,7 @@ waypoints.json formati:
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -75,6 +76,11 @@ class Mission:
     yield_park_node:   Optional[str] = None  # nereye yan park ettik
     yield_return_node: Optional[str] = None  # park sonrasi dondugumuz node
     yield_wait_ticks:  int           = 0     # park'ta/yolda kac tick bekledik (timeout)
+    # FP-20: cok-hop "refuge" retreat — tek-hop yan park IMKANSIZ oldugunda
+    # (dead-end dali / kopru koridorunda sikisma) park birkac hop otede bir
+    # siding olur. yield_path = [current, ..., park]; _plan_yield_step bu yolu
+    # hop hop yurutur. Tek-hop yan parkta [current, park] (eski davranis).
+    yield_path:        Optional[List[str]] = None
     # IN-FLIGHT hop: dispatch edilen (from, next) — hopComplete gelene kadar
     # planner YENI karar VERMEZ, ayni komutu yeniden uretir (executor dedup'lar).
     # Gercek dunyada firmware hareket halindeyken yeni hop'u reddeder; planner'in
@@ -480,8 +486,21 @@ class FleetPlanner:
                   if not m.is_done and m.agv_id not in self.disconnected_agvs]
         if not active:
             return None
-        # 1) Normal yield: 2+ aktif AGV varsa düşük öncelikliyi yüksek olana
-        #    yan-park ettir.
+        # 1) FP-19 BLOCKER EVICTION (kullanıcı isteği) — ÖNCE dene: WAIT eden
+        #    AGV'nin TEK yolunu görevi-olmayan (DONE/IDLE) bir AGV tıkıyorsa, o
+        #    blocker'ı geçici komşuya çek → sıkışan geçer → blocker eski yerine
+        #    döner. Bu HEDEFLI çözüm; generic yield'den (adım 2) önce gelmeli —
+        #    FP-20: aksi halde generic yield, gerçek blocker'ı (DONE AGV) hiç
+        #    görmeden düşük öncelikliyi boş yere oynatır → o AGV yield-resume
+        #    salınımına girer, deadlock detect (hep-WAIT) sıfırlanır, eviction
+        #    HİÇ çalışmaz → canlı kilit (livelock). Eviction'ı öne almak hem bu
+        #    salınımı keser hem dead-end (D/H/L) tıkanmasını çözer.
+        for m in sorted(active, key=self._priority_key):
+            yc = self._evict_blocker(m)
+            if yc is not None:
+                return yc
+        # 2) Generic yield: DONE-blocker yoksa (simetrik head-on deadlock) 2+
+        #    aktif AGV'de düşük öncelikliyi yüksek olana yan-park ettir.
         if len(active) >= 2:
             ordered = sorted(active, key=self._priority_key)
             winner  = ordered[0]
@@ -495,14 +514,6 @@ class FleetPlanner:
                 if yc is not None:
                     self.wait_streak[victims[0].agv_id] = 0
                     return yc
-        # 2) FP-19 BLOCKER EVICTION (kullanıcı isteği): WAIT eden AGV'nin TEK
-        #    yolunu görevi-olmayan (DONE/IDLE) bir AGV tıkıyorsa, o blocker'ı
-        #    geçici komşuya çek → sıkışan geçer → blocker eski yerine döner.
-        #    Dead-end node'larda (D/H/L) yan park imkânsız olduğunda tek çözüm.
-        for m in sorted(active, key=self._priority_key):
-            yc = self._evict_blocker(m)
-            if yc is not None:
-                return yc
         return None
 
     def _evict_blocker(self, m: Mission) -> Optional[HopCommand]:
@@ -620,6 +631,19 @@ class FleetPlanner:
                 agv_id=m.agv_id, action=HopAction.WAIT,
                 from_=m.current, reason="no next",
             )
+        # FP-20 GUVENLIK: me.next'i BASKA bir AGV tutuyorsa (oraya gidiyor ya da
+        # orada oturuyor) NORMAL surme — tick-ici sira yarisinda cozumun "diger
+        # yan cekilir" varsayimi tutmayabilir (ornek: refuge'ten resume eden AGV,
+        # ayni tick WAIT etmis bir araca dayanir). Rezervasyon = fiziksel iddia;
+        # tutuluysa BEKLE. (Soft-rezervasyon yalniz A* path planlamasinda gevsek;
+        # dispatch aninda dolu node'a surmek carpisma.) Ayni-yon takip/temiz yan
+        # park'ta (kazanan once islenip next'i kendi rezerve eder) tetiklenmez.
+        owner = self.reservations.node_owner.get(m.next_node)
+        if owner is not None and owner != m.agv_id:
+            return HopCommand(
+                agv_id=m.agv_id, action=HopAction.WAIT, from_=m.current,
+                reason=f"next {m.next_node} dolu ({owner}), bekle",
+            )
         if self.reservations.node_owner.get(m.current) == m.agv_id:
             del self.reservations.node_owner[m.current]
         self.reservations.reserve_node(m.next_node, m.agv_id)
@@ -650,11 +674,20 @@ class FleetPlanner:
         if me.next_node is None:
             return Conflict(ConflictType.NONE, me.agv_id, "", "")
 
-        # 1) Parked AGV tam next'te
+        # 1) Fiziksel olarak me.next'te DURAN AGV — uzerine surulemez.
+        #    DONE (parked engel) VEYA refuge'ine park etmis YIELDING (FP-20):
+        #    cok-hop refuge'te bekleyen AGV mission-path'i disinda oldugu icin
+        #    next/after'i None'dir; ucuncu bir AGV onu "gormeden" ustune surup
+        #    carpisirdi (3-AGV koridor). Refuge'teki YIELDING'i de parked say.
         for other in self.missions.values():
-            if other.agv_id == me.agv_id or other.state != MissionState.DONE:
+            if other.agv_id == me.agv_id or other.pos != me.next_node:
                 continue
-            if other.pos == me.next_node:
+            parked = (
+                other.state == MissionState.DONE
+                or (other.state == MissionState.YIELDING
+                    and other.pos == other.yield_park_node)
+            )
+            if parked:
                 return Conflict(
                     ConflictType.VERTEX, me.agv_id, other.agv_id, me.next_node,
                     detail=f"parked at {other.pos}",
@@ -740,6 +773,15 @@ class FleetPlanner:
         if other is None:
             return self._normal_hop(me)
 
+        # FP-20 KORIDOR KILIDI: oncelik tek basina "dolu node'a sur" hakki
+        # VERMEZ. Direct head-on'da diger AGV fiziksel olarak me.next'te oturur;
+        # priority-winner oraya surerse CARPISMA (kullanici raporu: "yol
+        # vermiyorlar"). Ayrica kaybeden, kazananin GECMESI GEREKEN node'unda
+        # oturuyorsa (kopru/dead-end dali) basit WAIT sonsuz kilit yaratir —
+        # kaybeden bir 'refuge'e cekilmeli, kazanan o cekilene dek beklemeli.
+        if self._needs_corridor_resolution(me, other, conflict):
+            return self._resolve_corridor(me, other)
+
         # 1) Ben oncelikliyim — hemen devam.
         if self._compute_priority(me, other):
             return self._normal_hop(me, reason=f"priority over {other.agv_id}")
@@ -801,6 +843,156 @@ class FleetPlanner:
             from_=me.current,
             reason=f"yielding to {other.agv_id}",
         )
+
+    # -----------------------------------------------------------------------
+    # FP-20: Koridor kilidi / kafa-kafaya (refuge retreat)
+    # -----------------------------------------------------------------------
+
+    def _on_remaining_path(self, m: Mission, node: str) -> bool:
+        """node, m'nin KALAN path'inde (pos dahil sonrasi) mi? m'nin gecmesi
+        gereken bir node'da baska AGV oturuyor mu kontrolu icin."""
+        if not node or m.pos not in m.path:
+            return False
+        return node in m.path[m.path.index(m.pos):]
+
+    def _needs_corridor_resolution(
+        self, me: Mission, other: Mission, conflict: Conflict,
+    ) -> bool:
+        """Bu cakisma 'koridor kilidi' mi — basit oncelik/WAIT yetmez, refuge
+        retreat gerekir mi?
+
+        Kosul (ikisi birden): kaybeden (dusuk oncelik) kazananin GECMESI
+        GEREKEN bir node'unda oturuyor VE tek-hop yan parki YOK (dead-end dali /
+        kopru). O zaman basit WAIT/priority sonsuz kilit → refuge retreat gerek.
+
+        AKSI HALDE eski (ucuz + test-uyumlu) akis yeterli:
+          - tek-hop yan park VARSA: kazanan NORMAL, kaybeden side-park (Sen.12).
+          - ayni-yon TAKIP (lider onde): kendiliginden cozulur (Sen.2/3/6) —
+            ters-yon head-on degilse koridor cozumu tetiklenmez.
+        Direct head-on'da (other tam me.next'te) 'blocks' zaten dogrudur."""
+        direct = (conflict.type == ConflictType.EDGE_SWAP
+                  and other.current == me.next_node)
+        # Ters-yon (opposing) head-on mu? Direct degilse path-overlap'e bak;
+        # ayni-yon takipte _find_path_headon None → koridor cozumu YOK.
+        if not direct and self._find_path_headon(me, other, lookahead=4) is None:
+            return False
+        higher, lower = ((me, other) if self._compute_priority(me, other)
+                         else (other, me))
+        blocks = direct or (bool(lower.current)
+                            and self._on_remaining_path(higher, lower.current))
+        if blocks and self._find_side_park(lower, higher) is None:
+            return True
+        return False
+
+    def _resolve_corridor(self, me: Mission, other: Mission) -> HopCommand:
+        """Koridor kilidi cozumu. _headon_plan ile KIM cekilir deterministik
+        secilir (iki AGV ayni karari verir). Cekilen ben'sem refuge retreat
+        baslat; degilsem cekilen gecene kadar BEKLE (hold)."""
+        yielder, path = self._headon_plan(me, other)
+        if yielder is None:
+            # Hicbir tarafa refuge yok — cozulemez topoloji (siding'siz duz
+            # koridor). WAIT → watchdog/manual mudahale. (Grafimizda siding
+            # var; bu dal pratikte nadir.)
+            return HopCommand(
+                agv_id=me.agv_id, action=HopAction.WAIT, from_=me.current,
+                reason=f"head-on {other.agv_id}: refuge yok (kilit)",
+            )
+        if yielder.agv_id == me.agv_id:
+            yc = self._begin_yield(me, other, path=path)
+            if yc is not None:
+                return yc
+            return HopCommand(
+                agv_id=me.agv_id, action=HopAction.WAIT, from_=me.current,
+                reason=f"head-on {other.agv_id}: cekilemiyorum",
+            )
+        # Diger AGV cekiliyor — o refuge'ine varana dek BEKLE (onun retreat'i
+        # benim path'imden/koprümden geciyor olabilir).
+        return HopCommand(
+            agv_id=me.agv_id, action=HopAction.WAIT, from_=me.current,
+            reason=f"head-on: {other.agv_id} cekiliyor, bekle",
+        )
+
+    def _headon_plan(
+        self, a: Mission, b: Mission,
+    ) -> Tuple[Optional[Mission], Optional[List[str]]]:
+        """Kafa-kafaya/koridor kilidinde KIM cekilir + retreat path'i.
+        Deterministik + simetrik (a,b sirasindan bagimsiz) → iki AGV ayni
+        tick'te ayni yielder'i secer. Tercih (en ucuz cozum once):
+          1) loser (dusuk oncelik) tek-hop yan park  (kazanan beklemez)
+          2) loser cok-hop refuge retreat            (kazanan bekler)
+          3) winner tek-hop yan park
+          4) winner cok-hop refuge retreat
+        Donus (yielder_mission, [current..park]) ya da (None,None)=cozumsuz."""
+        if self._priority_key(a) <= self._priority_key(b):
+            higher, lower = a, b
+        else:
+            higher, lower = b, a
+        for first, second in ((lower, higher), (higher, lower)):
+            park = self._find_side_park(first, second)
+            if park is not None:
+                return first, [first.current, park]
+            rp = self._find_refuge(first, second)
+            if rp is not None:
+                return first, rp
+        return None, None
+
+    def _find_refuge(
+        self, me: Mission, other: Mission,
+    ) -> Optional[List[str]]:
+        """me icin other'in KALAN path'inden TAMAMEN uzak bir 'refuge' (siding)
+        node'una EN KISA retreat path'ini bul (cok-hop). _find_side_park (tek-hop
+        komsu) basarisiz olunca kullanilir: me kopru koridoru / dead-end dalinda
+        sikismis, bitisiginde park yeri yok ama 2-3 hop otede siding var.
+
+        Donus [me.current, ..., R]; R: other'in kalan path'inde DEGIL, bloklu
+        degil, dead-end (degree-1) DEGIL (FP-18 tuzagi). BFS = en yakin refuge.
+        Retreat other'in GELECEK path'inden gecebilir (kopru) — kazanan o sirada
+        bekler (_resolve_corridor hold). other'in SU ANKI pozisyonuna ASLA girme
+        (fiziksel carpisma)."""
+        if not me.current:
+            return None
+        other_path: Set[str] = set()
+        if other.pos in other.path:
+            other_path = set(other.path[other.path.index(other.pos):])
+        for n in (other.current, other.next_node, other.after_node):
+            if n:
+                other_path.add(n)
+        blocked = self.reservations.blocked_nodes_for(me.agv_id)
+        for d in self.disconnected_agvs:
+            if d != me.agv_id:
+                pos = self.last_known_pos.get(d)
+                if pos:
+                    blocked = blocked | {pos}
+        # other'in fiziksel olarak isgal ettigi node'lar — retreat ASLA girmez
+        forbidden = {other.current}
+        if other.inflight:
+            forbidden.add(other.inflight[1])
+        prev: Dict[str, Optional[str]] = {me.current: None}
+        queue: deque = deque([me.current])
+        while queue:
+            cur = queue.popleft()
+            # Refuge gecerli mi? Genelde gecisli (degree>=2) olmali (FP-18
+            # dead-end tuzagi). ISTISNA: cur == me.goal — kendi hedefinde park
+            # TUZAK DEGIL (oraya varinca DONE, geri donmesi gerekmez). Alt-sira
+            # dead-end cikislarinda (orn. K→I: I hedef ama dead-end) sikisan AGV
+            # hedefine cikip koridoru bosaltir — kazanan o gecince ilerler.
+            if (cur != me.current and cur not in other_path
+                    and cur not in blocked
+                    and (len(self.graph.neighbors(cur)) >= 2
+                         or cur == me.goal)):
+                path = [cur]
+                p = prev[cur]
+                while p is not None:
+                    path.append(p)
+                    p = prev[p]
+                path.reverse()
+                return path
+            for nb, _ in self.graph.neighbors(cur):
+                if nb in prev or nb in forbidden or nb in blocked:
+                    continue
+                prev[nb] = cur
+                queue.append(nb)
+        return None
 
     def _dispatch_reroute(self, me: Mission, alt: List[str],
                           reason: str) -> HopCommand:
@@ -932,33 +1124,45 @@ class FleetPlanner:
 
     def _begin_yield(
         self, me: Mission, other: Mission, park: Optional[str] = None,
+        path: Optional[List[str]] = None,
     ) -> Optional[HopCommand]:
-        """me'yi yan parka yolla. park verilmezse _find_side_park ile seçilir
-        (blocker eviction kendi park'ını gerçek yola göre verir). Bulamazsa
-        None (caller WAIT'e dusurur). yield_return_node = me.current → other
-        geçince eski yere döner."""
-        if park is None:
-            park = self._find_side_park(me, other)
-        if park is None:
+        """me'yi yan parka / refuge'e yolla. Oncelik:
+          - path verilmisse (FP-20 cok-hop refuge): [me.current, ..., R] yolu
+            kullanilir, ilk hop dispatch edilir, gerisi _plan_yield_step yurur.
+          - park verilmisse tek-hop ([me.current, park]).
+          - hicbiri yoksa _find_side_park ile tek-hop secilir.
+        Bulamazsa None (caller WAIT'e dusurur). yield_return_node = me.current
+        → kazanan gecince oradan (refuge'te pos'tan) hedefe yeniden planlanir."""
+        if path is None:
+            if park is None:
+                park = self._find_side_park(me, other)
+            if park is None:
+                return None
+            path = [me.current, park]
+        if len(path) < 2:
             return None
+        park = path[-1]
+        nxt  = path[1]                       # ilk hop hedefi
         me.state             = MissionState.YIELDING
         me.yield_to          = other.agv_id
         me.yield_park_node   = park
+        me.yield_path        = list(path)
         me.yield_return_node = me.current
         me.yield_wait_ticks  = 0
-        me.inflight          = (me.current, park)
-        # Rezervasyon: current bos, park + edge tutulu
+        me.inflight          = (me.current, nxt)
+        # Rezervasyon: current bos, ilk hop hedefi + edge tutulu
         if self.reservations.node_owner.get(me.current) == me.agv_id:
             del self.reservations.node_owner[me.current]
-        self.reservations.reserve_node(park, me.agv_id)
-        self.reservations.reserve_edge(me.current, park, me.agv_id)
+        self.reservations.reserve_node(nxt, me.agv_id)
+        self.reservations.reserve_edge(me.current, nxt, me.agv_id)
         return HopCommand(
             agv_id = me.agv_id,
             action = HopAction.YIELD,
             from_  = me.current,
-            next_  = park,
+            next_  = nxt,
             after_ = None,
-            reason = f"side park for {other.agv_id}",
+            reason = (f"refuge for {other.agv_id}" if len(path) > 2
+                      else f"side park for {other.agv_id}"),
         )
 
     def _plan_yield_step(self, m: Mission) -> HopCommand:
@@ -975,22 +1179,38 @@ class FleetPlanner:
             return self._cancel_yield(m, "yield state corrupt")
 
         if m.pos != park:
-            # Parka henuz varilmadi. UC durum (FP-12 — kayip/ret komut kurtarma):
-            #   a) pos == return_node: hic kipirdamadik — YIELD komutu kaybolmus
-            #      ya da firmware reddetmis olabilir → komutu YENIDEN URET
-            #      (executor dedup + expiry ile spam'siz yeniden gonderir).
-            #      Cok uzun surduyse yield iptal, normal plana don.
-            #   b) pos baska bir node: surukleme/eski hop tamamlanmis — yield
-            #      gecersiz, iptal et (park artik komsu olmayabilir).
-            if m.pos == ret:
-                m.yield_wait_ticks += 1
-                if m.yield_wait_ticks >= self._YIELD_TIMEOUT_TICKS:
-                    return self._cancel_yield(m, "yield enroute timeout")
-                return HopCommand(
-                    agv_id=m.agv_id, action=HopAction.YIELD,
-                    from_=m.pos, next_=park, after_=None,
-                    reason=f"side park for {m.yield_to} (reissue)",
-                )
+            # Parka henuz varilmadi. FP-20: cok-hop refuge retreat — yield_path
+            # uzerinde pos'tan SONRAKI hop'u dispatch et (tek-hop yan parkta
+            # path=[ret, park], asagi mantik birebir eski davranisa iner).
+            #   - pos yield_path'te ve sonrasi var → siradaki hop'u YIELD et.
+            #     pos == ret (hic kipirdamadik) ise FP-12 reissue sayaci isler;
+            #     ilerlemisse sayac sifirlanir (kayip-komut yalnizca baslangicta).
+            #   - pos yield_path disinda (surukleme/eski hop) → yield iptal.
+            path = m.yield_path or [ret, park]
+            if m.pos in path:
+                idx = path.index(m.pos)
+                if idx + 1 < len(path):
+                    nxt = path[idx + 1]
+                    if m.pos == ret:
+                        m.yield_wait_ticks += 1
+                        if m.yield_wait_ticks >= self._YIELD_TIMEOUT_TICKS:
+                            return self._cancel_yield(m, "yield enroute timeout")
+                        reissue = " (reissue)"
+                    else:
+                        m.yield_wait_ticks = 0
+                        reissue = ""
+                    # Siradaki hop hedefi + edge rezerve (varsa eskiyi birak)
+                    if self.reservations.node_owner.get(m.pos) == m.agv_id:
+                        del self.reservations.node_owner[m.pos]
+                    self.reservations.reserve_node(nxt, m.agv_id)
+                    self.reservations.reserve_edge(m.pos, nxt, m.agv_id)
+                    m.inflight = (m.pos, nxt)
+                    kind = "refuge" if len(path) > 2 else "side park"
+                    return HopCommand(
+                        agv_id=m.agv_id, action=HopAction.YIELD,
+                        from_=m.pos, next_=nxt, after_=None,
+                        reason=f"{kind} for {m.yield_to}{reissue}",
+                    )
             return self._cancel_yield(m, f"yield drift ({m.pos})")
 
         # Diger AGV gecti mi?
@@ -1058,6 +1278,7 @@ class FleetPlanner:
         m.state             = MissionState.ACTIVE
         m.yield_to          = None
         m.yield_park_node   = None
+        m.yield_path        = None
         m.yield_return_node = None
         m.yield_wait_ticks  = 0
         m.inflight          = None
@@ -1081,6 +1302,7 @@ class FleetPlanner:
         m.state             = MissionState.ACTIVE
         m.yield_to          = None
         m.yield_park_node   = None
+        m.yield_path        = None
         m.yield_return_node = None
         m.yield_wait_ticks  = 0
         m.inflight          = None

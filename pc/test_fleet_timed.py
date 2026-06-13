@@ -368,6 +368,43 @@ def run_all_scenarios():
     assert_true("AGV_2 eski yerine döndü (C)", p.missions["AGV_2"].pos == "C",
                 p.missions["AGV_2"].pos)
 
+    # ------------------------------------------------------------ 12
+    print("\n[12] FP-20 head-on refuge: yan park YOK koridorda kafa kafaya")
+    # KULLANICI RAPORU ("çarpışma yol vermiyorlar asla"): AGV_1 E→L (E-F-J-K-L)
+    # ve AGV_2 K→A (K-J-F-E-A) E-F-J-K köprü koridorunda TAM ters yön. K'nın tek
+    # komşuları J (koridor) + L (dead-end) → AGV_2 yan park EDEMEZ. Eski kod:
+    # priority-winner AGV_1, AGV_2'nin durduğu K'ya sürüp çarpışıyordu (sonsuz
+    # kilit, elle CLEAR ALL gerekiyordu). FP-20: AGV_2 çok-hop refuge'e (siding
+    # G: K-J-F-G) çekilir, AGV_1 o çekilene dek HOLD eder, sonra E-F-J-K-L geçer,
+    # AGV_2 G-F-E-A tamamlar. Çarpışmasız + elle müdahalesiz.
+    for wd in (False, True):
+        g, p = new_planner()
+        s = TimedSim(g, p, watchdog=wd)
+        s.add("AGV_1", "L", start="E")
+        s.add("AGV_2", "A", start="K")
+        r = s.run(max_ticks=200)
+        assert_true(f"[wd={wd}] kafa kafaya çözüldü (done)", r == "done", r)
+        assert_true(f"[wd={wd}] çarpışma yok (refuge retreat)",
+                    not s.violations, s.violations[:3])
+        assert_true(f"[wd={wd}] AGV_1 hedefte (L)",
+                    p.missions["AGV_1"].pos == "L", p.missions["AGV_1"].pos)
+        assert_true(f"[wd={wd}] AGV_2 hedefte (A)",
+                    p.missions["AGV_2"].pos == "A", p.missions["AGV_2"].pos)
+
+    # ------------------------------------------------------------ 12b
+    print("\n[12b] FP-20 3-AGV koridor: refuge'teki YIELDING engel sayılır")
+    # AGV_1 E→L, AGV_2 K→A, AGV_3 I→D. AGV_2 siding G'ye çekilirken AGV_3'ün
+    # yolu da G'den geçer; refuge'te park etmiş YIELDING AGV_2 üçüncü araç için
+    # engel olarak görülmeli (yoksa AGV_3 üstüne sürerdi). Hepsi çarpışmasız.
+    g, p = new_planner()
+    s = TimedSim(g, p, watchdog=True)
+    s.add("AGV_1", "L", start="E")
+    s.add("AGV_2", "A", start="K")
+    s.add("AGV_3", "D", start="I")
+    r = s.run(max_ticks=300)
+    assert_true("3-AGV koridor çözüldü (done)", r == "done", r)
+    assert_true("3-AGV çarpışma yok", not s.violations, s.violations[:3])
+
 
 def main() -> int:
     run_all_scenarios()

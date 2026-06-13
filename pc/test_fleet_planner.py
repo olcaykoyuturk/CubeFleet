@@ -475,9 +475,14 @@ def scenario_16_simultaneous_headon(g: Graph):
     c2 = cmds["AGV_2"]
     print(f"    AGV_1: {c1}")
     print(f"    AGV_2: {c2}")
-    # AGV_1 priority winner → NORMAL
-    assert_eq("AGV_1 NORMAL", c1.action, HopAction.NORMAL)
-    # AGV_2 head-on detect → reroute veya WAIT (carpismadan)
+    # FP-20: AGV_2 (I dead-end, tek-hop yan park YOK) refuge'e (I-J-K) cekilir;
+    # AGV_1 o cekilene kadar HOLD eder (WAIT). Eskiden AGV_1 NORMAL ile kafa
+    # kafaya surup K'da/koridorda carpisiyordu (idealize sim gizliyordu). Artik
+    # winner ya hemen NORMAL (kaybeden off-path yan park edebiliyorsa) ya da
+    # kaybeden refuge'e cekilirken HOLD → her ikisi de gecerli + carpismasiz.
+    assert_in("AGV_1 NORMAL veya hold (head-on)",
+              c1.action, [HopAction.NORMAL, HopAction.WAIT])
+    # AGV_2 head-on detect → refuge/yield/reroute veya WAIT (carpismadan)
     assert_in("AGV_2 head-on response",
               c2.action, [HopAction.NORMAL, HopAction.WAIT, HopAction.YIELD])
     # Full sim — carpismadan ikisi de tamamlanmali
