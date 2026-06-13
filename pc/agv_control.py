@@ -2280,10 +2280,11 @@ class AGVControlApp(ctk.CTk):
                     self._cam_log_last_seq[agv_id] = cur_seq
             except Exception:
                 pass
-            # Kontrolor aktifken HIZLI yokla (gercek settle icin taze arm_state),
-            # degilse 1.5 sn. stop sinyalinde hemen cik.
+            # Kontrolor aktifken VEYA kup operasyonu (SEARCH base acisi takibi)
+            # sirasinda HIZLI yokla — taze arm_state gerek; degilse 1.5 sn.
             pc = self.auto_pickup.get(agv_id)
-            fast = bool(pc is not None and getattr(pc, "active", False))
+            fast = bool((pc is not None and getattr(pc, "active", False))
+                        or agv_id in self.cube_ops)
             self._cam_log_stop_evt.wait(0.15 if fast else 1.5)
 
     # NOT: _on_cam_toggle / _capture_background / _clear_background metotlari
@@ -2499,8 +2500,14 @@ class AGVControlApp(ctk.CTk):
 
     CUBE_GOTO_TIMEOUT_S   = 180.0   # planner görevi (çok hop + yield olabilir)
     CUBE_FACE_TIMEOUT_S   = 40.0    # faceDir → faceComplete
-    CUBE_WARMUP_TIMEOUT_S = 8.0     # stream + YOLO ilk tespit
+    CUBE_SEARCH_TIMEOUT_S = 35.0    # base süpürme arama güvenlik süresi
     CUBE_DELIVER_HOME_S   = 3.5     # GRABBED sonrası kol HOME otursun, sonra taşı
+    # Küp arama (base servosu süpürme) — config override edilebilir, AGV bazında
+    SEARCH_BASE_MIN_DEFAULT  = 40    # süpürme alt açısı
+    SEARCH_BASE_MAX_DEFAULT  = 140   # süpürme üst açısı
+    SEARCH_SWEEPS_DEFAULT    = 2     # kaç git-gel tur; bulamazsa "küp bulunamadı"
+    SEARCH_ARRIVE_TOL        = 4     # base hedefe bu kadar yaklaşınca "vardı"
+    SEARCH_SETTLE_S          = 1.2   # arama pozu otursun + ilk tarama (süpürme öncesi)
 
     def _build_cube_pickup_panel(self, parent):
         """Operations 'KÜP TOPLAMA' paneli: alınacak küp + bırakılacak yer seç →
@@ -2890,17 +2897,48 @@ class AGVControlApp(ctk.CTk):
                 return
             self._cube_release_seq(agv_id)
             return
-        # FACE (al) → pickup node doğrula + kamera/YOLO ısıt
+        # FACE (al) → pickup node doğrula + arama poz + base süpürme başlat
         if ev.node and op["node"] and ev.node != op["node"]:
             self._cube_op_fail(agv_id, f"yanlış node'da döndü ({ev.node} ≠ "
                                        f"{op['node']})")
             return
-        op["phase"] = "WARMUP"
-        op["deadline"] = time.time() + self.CUBE_WARMUP_TIMEOUT_S
+        self._cube_start_search(agv_id)
+
+    def _cube_start_search(self, agv_id: str):
+        """Arama pozuna geç + kamera/YOLO aç + base süpürmeyi başlat. Kol
+        shoulder/elbow/gripper'ı search_pose'a (kamera sahaya bakar), base
+        süpürme alt açısına gider; tick base'i alt↔üst arası süpürür, küp
+        görününce PICKUP, SEARCH_SWEEPS tur bulamazsa 'küp bulunamadı'."""
+        op = self.cube_ops.get(agv_id)
+        if op is None:
+            return
         self._ensure_arm_state(agv_id)
         self._cam_connect(agv_id)
         self.detect_vars[agv_id].set(True)
-        self._cube_log(agv_id, "kamera + YOLO ısınıyor (küp tespiti bekleniyor)")
+
+        auto = self._pickup_cfg(agv_id).get("autonomous", {}) or {}
+        sp = auto.get("search_pose") or [90, 130, 10, 75]
+        bmin = int(auto.get("search_base_min", self.SEARCH_BASE_MIN_DEFAULT))
+        bmax = int(auto.get("search_base_max", self.SEARCH_BASE_MAX_DEFAULT))
+        sweeps = int(auto.get("search_sweeps", self.SEARCH_SWEEPS_DEFAULT))
+        speed = int(auto.get("pickup_speed_ms", 40) or 40)
+
+        op["phase"] = "SEARCH"
+        op["search_bmin"], op["search_bmax"] = bmin, bmax
+        op["search_target"] = bmax     # ilk yön: alt → üst
+        op["search_turns_left"] = max(1, sweeps)
+        op["search_armed"] = False     # poz oturana kadar süpürme başlamaz
+        op["deadline"] = time.time() + self.SEARCH_SETTLE_S    # poz oturma
+        op["search_deadline"] = time.time() + self.CUBE_SEARCH_TIMEOUT_S
+
+        self._arm_http_get(agv_id, f"/servo/speed?ms={speed}")
+        # shoulder ÖNCE (çarpışma önleme, _goto_search ile aynı mantık)
+        self._arm_http_get(agv_id, f"/servo?id=1&a={int(sp[1])}")
+        self._arm_http_get(agv_id, f"/servo?id=2&a={int(sp[2])}")
+        self._arm_http_get(agv_id, f"/servo?id=3&a={int(sp[3])}")
+        self._arm_http_get(agv_id, f"/servo?id=0&a={bmin}")    # base başlangıç
+        self._cube_log(agv_id, f"🔍 küp aranıyor: base {bmin}↔{bmax} süpürme "
+                               f"({op['search_turns_left']} tur)")
         self._refresh_cube_panel()
 
     def _cube_ops_tick(self):
@@ -2933,20 +2971,8 @@ class AGVControlApp(ctk.CTk):
             elif ph in ("FACE", "DELIVER_FACE"):
                 if now > op["deadline"]:
                     self._cube_op_fail(agv_id, "faceComplete gelmedi (zaman aşımı)")
-            elif ph == "WARMUP":
-                det = self.detection_state.get(agv_id)
-                if det and now - float(det.get("ts", 0)) < 0.5:
-                    op["phase"] = "PICKUP"
-                    self._pickup_start(agv_id)
-                    pc = self.auto_pickup.get(agv_id)
-                    if pc is None or not pc.active:
-                        self._cube_op_fail(agv_id, "kapma başlatılamadı "
-                                                   "(kalibrasyon?)")
-                    else:
-                        self._refresh_cube_panel()
-                elif now > op["deadline"]:
-                    self._cube_op_fail(agv_id, "küp kamerada görünmedi — "
-                                               "yön/mesafe kontrol et")
+            elif ph == "SEARCH":
+                self._cube_search_tick(agv_id, op, now)
             elif ph == "PICKUP":
                 pc = self.auto_pickup.get(agv_id)
                 if pc is None:
@@ -2974,6 +3000,58 @@ class AGVControlApp(ctk.CTk):
                                        f"kapma bitmedi ({pc.state}): {pc.message}")
             # DELIVER_HOME (after ile) ve RELEASE (after-zinciriyle) tick beklemez
 
+    def _cube_search_tick(self, agv_id: str, op: dict, now: float):
+        """Base süpürme arama: küp görününce PICKUP; base hedefe varınca yön
+        çevir; SEARCH_SWEEPS git-gel bulamazsa 'küp bulunamadı' iptal.
+
+        Base açısı /poll arm_state'ten okunur (cube_ops aktifken hızlı poll —
+        _cam_log_loop). arm_state yoksa süpürme adımı bekler (zararsız)."""
+        # 1) Küp göründü mü? → base'i durdur, kapmaya geç
+        det = self.detection_state.get(agv_id)
+        if det and now - float(det.get("ts", 0)) < 0.5:
+            st = self.arm_state.get(agv_id) or {}
+            servos = st.get("servos")
+            if servos:
+                self._arm_http_get(agv_id, f"/servo?id=0&a={int(servos[0])}")
+            op["phase"] = "PICKUP"
+            self._cube_log(agv_id, "🎯 küp bulundu — kapma başlıyor")
+            self._pickup_start(agv_id)
+            pc = self.auto_pickup.get(agv_id)
+            if pc is None or not pc.active:
+                self._cube_op_fail(agv_id, "kapma başlatılamadı (kalibrasyon?)")
+            else:
+                self._refresh_cube_panel()
+            return
+        # 2) Toplam güvenlik süresi
+        if now > op.get("search_deadline", now + 1):
+            self._cube_op_fail(agv_id, "küp bulunamadı (zaman aşımı)")
+            return
+        # 3) Arama pozu otursun (ilk SETTLE), sonra süpürmeyi başlat
+        if not op.get("search_armed"):
+            if now < op["deadline"]:
+                return
+            op["search_armed"] = True
+            self._arm_http_get(agv_id, f"/servo?id=0&a={op['search_target']}")
+            return
+        # 4) Base hedefe vardı mı? → yön çevir / tur say
+        st = self.arm_state.get(agv_id) or {}
+        servos = st.get("servos")
+        if not servos:
+            return   # arm_state henüz yok — süpürme rampada, bekle
+        base_cur = float(servos[0])
+        tgt = op["search_target"]
+        if abs(base_cur - tgt) <= self.SEARCH_ARRIVE_TOL:
+            bmin, bmax = op["search_bmin"], op["search_bmax"]
+            if tgt == bmax:
+                op["search_target"] = bmin          # üst'e vardı → alt'a dön
+            else:
+                op["search_turns_left"] -= 1        # alt'a döndü → 1 git-gel bitti
+                if op["search_turns_left"] <= 0:
+                    self._cube_op_fail(agv_id, "küp bulunamadı")
+                    return
+                op["search_target"] = bmax
+            self._arm_http_get(agv_id, f"/servo?id=0&a={op['search_target']}")
+
     def _cube_op_fail(self, agv_id: str, msg: str):
         self.cube_ops.pop(agv_id, None)
         self._cube_log(agv_id, f"✗ operasyon iptal: {msg}")
@@ -2997,6 +3075,8 @@ class AGVControlApp(ctk.CTk):
                     self.client.command(agv, "stop")
             elif op["phase"] == "PICKUP":
                 self._pickup_stop(agv)
+            elif op["phase"] == "SEARCH":
+                self._arm_http_get(agv, "/arm/freeze")   # base süpürmeyi durdur
             self._cube_op_fail(agv, "kullanıcı iptali")
         else:
             self._set_status("İptal edilecek küp operasyonu yok")
