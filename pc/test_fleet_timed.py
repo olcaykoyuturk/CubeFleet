@@ -351,6 +351,23 @@ def run_all_scenarios():
     else:
         assert_true("yield bekleniyordu (senaryo kurulamadı)", False, y)
 
+    # ------------------------------------------------------------ 11
+    print("\n[11] blocker eviction: görevsiz AGV sıkışan araca yol verir (FP-19)")
+    # AGV_2 C'de DONE (görevi yok); AGV_1 D→H — D dead-end, tek çıkış C dolu →
+    # yan park imkânsız → klasik deadlock. Watchdog blocker eviction: AGV_2
+    # geçici B'ye çekilir, AGV_1 D-C-G-H geçer, AGV_2 eski yeri C'ye döner.
+    g, p = new_planner()
+    s = TimedSim(g, p, watchdog=True)
+    s.add("AGV_2", "C", start="C")   # done @ C (blocker)
+    s.add("AGV_1", "H", start="D")   # D→H, dead-end sıkışması
+    r = s.run(max_ticks=400)
+    assert_true("eviction ile çözüldü (done)", r == "done", r)
+    assert_true("çarpışma yok", not s.violations, s.violations[:3])
+    assert_true("AGV_1 hedefe vardı (H)", p.missions["AGV_1"].pos == "H",
+                p.missions["AGV_1"].pos)
+    assert_true("AGV_2 eski yerine döndü (C)", p.missions["AGV_2"].pos == "C",
+                p.missions["AGV_2"].pos)
+
 
 def main() -> int:
     run_all_scenarios()

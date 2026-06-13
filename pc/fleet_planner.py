@@ -439,10 +439,20 @@ class FleetPlanner:
         return (not m.has_cargo, m.fifo_order - aging, m.agv_id)
 
     def _prioritize_missions(self) -> List[Mission]:
-        """Cargo > FIFO(+aging) > ID. Disconnected ve is_done atlanir."""
+        """Cargo > FIFO(+aging) > ID. Disconnected ve is_done atlanir.
+        İSTİSNA: YIELDING mission (geçici yan park / blocker eviction) is_done
+        olsa bile (DONE AGV başka araca yol veriyor) işlenmeli — yoksa park'a
+        gidip geri dönemez."""
         active = [m for m in self.missions.values()
-                  if not m.is_done and m.agv_id not in self.disconnected_agvs]
-        return sorted(active, key=self._priority_key)
+                  if (not m.is_done or m.state == MissionState.YIELDING)
+                  and m.agv_id not in self.disconnected_agvs]
+        # YIELDING (yan park / blocker eviction) mission'lar tick'te EN SONA:
+        # böylece sıkışan/aktif AGV ÖNCE replan eder, yield eden onun GÜNCEL
+        # yolunu görüp doğru bekler (yoksa eski [pos] path'ini "clear" sanıp
+        # erken döner → çakışma döngüsü).
+        return sorted(active,
+                      key=lambda m: ((m.state == MissionState.YIELDING),)
+                                    + tuple(self._priority_key(m)))
 
     # -----------------------------------------------------------------------
     # Production deadlock tespiti + kurtarma (yalniz watchdog cagirir;
@@ -468,22 +478,70 @@ class FleetPlanner:
         (>=3 AGV) ve disconnected-strand kalintilarini kirar."""
         active = [m for m in self.missions.values()
                   if not m.is_done and m.agv_id not in self.disconnected_agvs]
-        if len(active) < 2:
+        if not active:
             return None
-        ordered = sorted(active, key=self._priority_key)
-        winner  = ordered[0]
-        # FP-14: zaten YIELDING olan kurban yeniden yield edilemez (park
-        # alanlari ust uste biner, state bozulur) — dusuk oncelikli ama
-        # ACTIVE/QUEUED olan ilk adayi sec.
-        victims = [m for m in reversed(ordered[1:])
-                   if m.state != MissionState.YIELDING]
-        if not victims:
+        # 1) Normal yield: 2+ aktif AGV varsa düşük öncelikliyi yüksek olana
+        #    yan-park ettir.
+        if len(active) >= 2:
+            ordered = sorted(active, key=self._priority_key)
+            winner  = ordered[0]
+            # FP-14: zaten YIELDING olan kurban yeniden yield edilemez (park
+            # alanlari ust uste biner, state bozulur) — dusuk oncelikli ama
+            # ACTIVE/QUEUED olan ilk adayi sec.
+            victims = [m for m in reversed(ordered[1:])
+                       if m.state != MissionState.YIELDING]
+            if victims:
+                yc = self._begin_yield(victims[0], winner)
+                if yc is not None:
+                    self.wait_streak[victims[0].agv_id] = 0
+                    return yc
+        # 2) FP-19 BLOCKER EVICTION (kullanıcı isteği): WAIT eden AGV'nin TEK
+        #    yolunu görevi-olmayan (DONE/IDLE) bir AGV tıkıyorsa, o blocker'ı
+        #    geçici komşuya çek → sıkışan geçer → blocker eski yerine döner.
+        #    Dead-end node'larda (D/H/L) yan park imkânsız olduğunda tek çözüm.
+        for m in sorted(active, key=self._priority_key):
+            yc = self._evict_blocker(m)
+            if yc is not None:
+                return yc
+        return None
+
+    def _evict_blocker(self, m: Mission) -> Optional[HopCommand]:
+        """m: hedefe ulaşamayan (WAIT) aktif AGV. Yolu DONE/IDLE bir AGV
+        tıkıyorsa onu geçici bir komşuya çek (return = blocker'ın eski yeri).
+        Blocker yield-return mekanizmasıyla, m geçtikten sonra eski yerine döner.
+
+        Bir done AGV'nin pozisyonu A*'tan ÇIKARILINCA m'nin yolu açılıyorsa o
+        AGV blocker'dır. Blocker'ı, açılan yolun ÜZERİNDE OLMAYAN boş bir
+        komşusuna park ettir (yoksa tekrar tıkar)."""
+        if m.is_done or not m.goal or m.pos == m.goal:
             return None
-        victim = victims[0]
-        yc = self._begin_yield(victim, winner)
-        if yc is not None:
-            self.wait_streak[victim.agv_id] = 0
-        return yc
+        blockers = [b for b in self.missions.values()
+                    if b.state == MissionState.DONE and b.agv_id != m.agv_id
+                    and b.agv_id not in self.disconnected_agvs and b.pos]
+        if not blockers:
+            return None
+        done_pos = {b.pos for b in blockers}
+        for b in blockers:
+            # b kaldırılınca (diğer DONE'lar bloklu) m'nin yolu açılıyor mu?
+            others = done_pos - {b.pos}
+            path = self.graph.astar(m.pos, m.goal, blocked_nodes=others)
+            if not path or len(path) <= 1 or b.pos not in path:
+                continue
+            # b'yi açılan yol (path) DIŞINDA boş bir komşuya çek.
+            on_path = set(path)
+            for nb, _ in self.graph.neighbors(b.pos):
+                if nb in on_path:
+                    continue
+                owner = self.reservations.node_owner.get(nb)
+                if owner not in (None, b.agv_id):
+                    continue
+                yc = self._begin_yield(b, m, park=nb)
+                if yc is not None:
+                    yc.reason = (f"evict: {b.agv_id} {b.pos}->{nb} "
+                                 f"(yol ver {m.agv_id})")
+                    self.wait_streak[m.agv_id] = 0
+                    return yc
+        return None
 
     def _plan_hop(self, m: Mission) -> HopCommand:
         """Bir mission icin sonraki hop komutunu hesapla.
@@ -873,10 +931,14 @@ class FleetPlanner:
         return candidates[0][1]
 
     def _begin_yield(
-        self, me: Mission, other: Mission,
+        self, me: Mission, other: Mission, park: Optional[str] = None,
     ) -> Optional[HopCommand]:
-        """me'yi yan parka yolla. Side park bulamazsa None (caller WAIT'e dusurur)."""
-        park = self._find_side_park(me, other)
+        """me'yi yan parka yolla. park verilmezse _find_side_park ile seçilir
+        (blocker eviction kendi park'ını gerçek yola göre verir). Bulamazsa
+        None (caller WAIT'e dusurur). yield_return_node = me.current → other
+        geçince eski yere döner."""
+        if park is None:
+            park = self._find_side_park(me, other)
         if park is None:
             return None
         me.state             = MissionState.YIELDING
