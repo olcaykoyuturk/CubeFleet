@@ -54,7 +54,7 @@ extern int             linePosition;
 extern int             baseSpeed;
 
 // --- navigation.ino ---
-extern char     currentWaypoint;            // Şu anki konum ('A'-'I', 0=bilinmiyor)
+extern char     currentWaypoint;            // Şu anki konum ('A'-'L', 0=bilinmiyor)
 extern char     targetWaypoint;             // Hedef waypoint
 extern char     navPath[MAX_PATH_LENGTH];   // BFS yolu
 extern int      navPathLength;              // Yol uzunluğu

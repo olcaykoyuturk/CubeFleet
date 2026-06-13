@@ -1,7 +1,7 @@
 // ===== RC522 RFID Okuyucu =====
 // Kavşaktaki kartı okur, waypoint harfini döndürür.
 // Kart formatı: MIFARE Classic 1K, Sector 1 Block 4
-//   byte[0] = waypoint harfi ('A'–'I' arası ASCII)
+//   byte[0] = waypoint harfi ('A'–'L' arası ASCII)
 //
 // Kart yazmak için rfid_writer/ sketch'ini kullanın.
 

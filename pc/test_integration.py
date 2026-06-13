@@ -255,18 +255,20 @@ def scenario_future_headon_reroute(g: Graph) -> None:
 
 
 def scenario_parked_obstacle_reroute(g: Graph) -> None:
-    """Parked AGV path'i bloklarsa diger AGV reroute eder."""
+    """Parked AGV path'i bloklarsa diger AGV reroute eder (ust dongu uzerinden).
+    4×3 grafta A-E-F-G-C-B-A bir dongu olusturur: E bloklanirsa A→F ust siradan
+    dolanir (A-B-C-G-F)."""
     print("\n[10] Parked AGV path bloklar -> reroute")
     f = FlowSim(g)
-    # AGV_1 H'de parked
-    f.connect("AGV_1", "H")
-    f.planner.add_mission("AGV_1", goal="H", start="H")
-    # AGV_2 A'dan I'ya — normal path A-B-E-H-I, H bloklu
+    # AGV_1 E'de parked (A→F'nin normal yolu A-E-F uzerinde)
+    f.connect("AGV_1", "E")
+    f.planner.add_mission("AGV_1", goal="E", start="E")
+    # AGV_2 A'dan F'ye — normal A-E-F, E bloklu → A-B-C-G-F reroute
     f.connect("AGV_2", "A")
-    f.planner.add_mission("AGV_2", goal="I", start="A")
+    f.planner.add_mission("AGV_2", goal="F", start="A")
     m2 = f.planner.missions["AGV_2"]
-    truthy("AGV_2 yolu ulasilamaz veya H'siz",
-           m2.path == ["A"] or "H" not in m2.path)
+    truthy("AGV_2 E'siz alternatif yol buldu (reroute)",
+           len(m2.path) > 1 and "E" not in m2.path)
 
 
 def scenario_same_pos_goal_noop(g: Graph) -> None:

@@ -1788,9 +1788,15 @@ class AGVControlApp(ctk.CTk):
         planner'a node olarak sizip mission.pos'u bozmasin (FP-10)."""
         return wp if (wp and wp in self.fleet_graph.nodes) else None
 
-    def _planner_assign_target(self, agv_id: str, goal: str) -> None:
+    def _planner_assign_target(self, agv_id: str, goal: str,
+                               interactive: bool = True) -> None:
         """Operations sekmesinden gelen 'Hedef Ata' istegini planner uzerinden
         AGV'ye yonlendir.
+
+        interactive=False (BUG-3): kup otomatik akisindan cagrildiginda modal
+        popup ACMA — AGV mesgulse sessizce reddet (caller op'u fail eder).
+        Modal, after()-tabanli otomatik akisin ortasinda tum UI dongusunu
+        donduruyordu.
 
         Durum kontrolu:
           - konum yok → reddet
@@ -1827,8 +1833,13 @@ class AGVControlApp(ctk.CTk):
             self._set_status(f"{agv_id}: zaten {goal} konumunda")
             return
 
-        # AGV mesgul mu? IDLE disinda popup ile sor.
+        # AGV mesgul mu? IDLE disinda: interactive ise popup, degilse sessiz red.
         if nav_state and nav_state != "IDLE":
+            if not interactive:
+                self._set_status(
+                    f"{agv_id}: meşgul ({nav_state}) — küp operasyonu iptal",
+                    err=True)
+                return
             import tkinter.messagebox as mb
             choice = mb.askyesno(
                 "AGV mesgul",
@@ -2812,9 +2823,9 @@ class AGVControlApp(ctk.CTk):
                             f"{SIDE_LABELS_TR.get(cube.side or '', cube.side)} → "
                             f"bırak {drop_node}·{SIDE_LABELS_TR.get(drop_side, drop_side)}")
         if pos == cube.node:
-            self._cube_send_face(agv, cube.side, "FACE")
+            self._cube_send_face(agv, str(cube.side), "FACE")
         else:
-            self._planner_assign_target(agv, cube.node)   # type: ignore[arg-type]
+            self._planner_assign_target(agv, cube.node, interactive=False)   # type: ignore[arg-type]
             m = self.fleet_planner.missions.get(agv)
             if m is None or m.goal != cube.node or len(m.path) <= 1:
                 self.fleet_planner.cancel_mission(agv)
@@ -2839,7 +2850,7 @@ class AGVControlApp(ctk.CTk):
         if pos == drop_node:
             self._cube_send_face(agv, drop_side, "DELIVER_FACE")
         else:
-            self._planner_assign_target(agv, drop_node)   # type: ignore[arg-type]
+            self._planner_assign_target(agv, drop_node, interactive=False)
             m = self.fleet_planner.missions.get(agv)
             if m is None or m.goal != drop_node or len(m.path) <= 1:
                 self.fleet_planner.cancel_mission(agv)
@@ -2860,7 +2871,7 @@ class AGVControlApp(ctk.CTk):
         if pos == drop_node:
             self._cube_send_face(agv_id, op["drop_side"], "DELIVER_FACE")
         else:
-            self._planner_assign_target(agv_id, drop_node)
+            self._planner_assign_target(agv_id, drop_node, interactive=False)
             m = self.fleet_planner.missions.get(agv_id)
             if m is None or m.goal != drop_node or len(m.path) <= 1:
                 self.fleet_planner.cancel_mission(agv_id)
@@ -2913,6 +2924,12 @@ class AGVControlApp(ctk.CTk):
         if op is None:
             return
         self._ensure_arm_state(agv_id)
+        # BUG-4: op'un kamera/YOLO'yu AÇTIĞINI işaretle ki bitince yalnız op'un
+        # açtığını kapatalım (kullanıcının manuel açtığına dokunma — sızıntıyı
+        # önler: yoksa YOLO çıkarımı + stream op sonrası süresiz açık kalırdı).
+        dv = self.detect_vars.get(agv_id)
+        op["detect_opened"] = not (dv is not None and dv.get())
+        op["cam_opened"] = agv_id not in self.stream_readers
         self._cam_connect(agv_id)
         self.detect_vars[agv_id].set(True)
 
@@ -2988,6 +3005,8 @@ class AGVControlApp(ctk.CTk):
                     # Kol HOME'a oturmadan AGV hareket ederse çarpabilir →
                     # DELIVER_HOME fazında CUBE_DELIVER_HOME_S bekle, sonra taşı.
                     self._arm_http_get(agv_id, "/arm/home")
+                    # Kapma bitti — taşıma sırasında kamera/YOLO gereksiz (BUG-4).
+                    self._cube_search_cleanup(agv_id, op)
                     self._cubes_redraw()
                     op["phase"] = "DELIVER_HOME"
                     self._cube_log(agv_id, f"🎯 K{cid} alındı — kol taşıma pozuna "
@@ -3052,8 +3071,25 @@ class AGVControlApp(ctk.CTk):
                 op["search_target"] = bmax
             self._arm_http_get(agv_id, f"/servo?id=0&a={op['search_target']}")
 
+    def _cube_search_cleanup(self, agv_id: str, op: Optional[dict] = None):
+        """Küp op'unun AÇTIĞI kamera stream + YOLO tespitini kapat (BUG-4 sızıntı
+        önlemi). op verilmezse cube_ops'tan alınır. Kullanıcının manuel açtığı
+        stream/tespit (op açmadıysa) korunur. detection_state her hâlükârda
+        temizlenir (bayat tespit bir sonraki op'u yanıltmasın)."""
+        if op is None:
+            op = self.cube_ops.get(agv_id)
+        if op is not None:
+            if op.get("detect_opened"):
+                v = self.detect_vars.get(agv_id)
+                if v is not None:
+                    v.set(False)
+            if op.get("cam_opened"):
+                self._cam_disconnect(agv_id)
+        self.detection_state.pop(agv_id, None)
+
     def _cube_op_fail(self, agv_id: str, msg: str):
-        self.cube_ops.pop(agv_id, None)
+        op = self.cube_ops.pop(agv_id, None)
+        self._cube_search_cleanup(agv_id, op)
         self._cube_log(agv_id, f"✗ operasyon iptal: {msg}")
         self._set_status(f"{agv_id} küp operasyonu: {msg}", err=True)
         self._refresh_cube_panel()
@@ -3087,6 +3123,13 @@ class AGVControlApp(ctk.CTk):
         if res is None:
             return
         client, agv = res
+        # BUG-5: küp operasyonu faceComplete beklerken manuel faceDir gönderme —
+        # gelen faceComplete op'u (yanlış yöne dönülmüş olsa bile) ilerletir.
+        op = self.cube_ops.get(agv)
+        if op is not None and op.get("phase") in ("FACE", "DELIVER_FACE"):
+            self._set_status(f"{agv}: küp operasyonu dönüş bekliyor — manuel "
+                             f"faceDir engellendi", err=True)
+            return
         if client.face_dir(agv, d):
             self._cube_log(agv, f"manuel faceDir {d}")
         else:
@@ -3134,7 +3177,14 @@ class AGVControlApp(ctk.CTk):
                                    "olduğu pozdan bırakılıyor")
             settle_ms = 300
 
+        # GUARD (BUG-1): bu after() zinciri ACİL DUR / iptal sırasında iptal
+        # edilemez (after_id saklanmıyor). ACİL DUR cube_ops'u temizler +
+        # /arm/freeze yollar; guard'sız _do_home koşulsuz /arm/home ile freeze'i
+        # ezip kolu hareket ettirirdi. Faz hâlâ RELEASE değilse no-op.
         def _do_release():
+            op2 = self.cube_ops.get(agv_id)
+            if op2 is None or op2.get("phase") != "RELEASE":
+                return                                   # iptal edildi / estop
             self._arm_http_get(agv_id, "/magnet?s=0")
             var = self.arm_magnet_vars.get(agv_id)
             if var is not None:
@@ -3142,16 +3192,19 @@ class AGVControlApp(ctk.CTk):
             self.after(900, _do_home)
 
         def _do_home():
+            op2 = self.cube_ops.get(agv_id)
+            if op2 is None or op2.get("phase") != "RELEASE":
+                return                                   # iptal edildi / estop
             self._arm_http_get(agv_id, "/arm/home")
-            op2 = self.cube_ops.pop(agv_id, None)
-            if op2 is not None:
-                dn = str(op2.get("drop_node") or op2.get("node") or "")
-                ds = str(op2.get("drop_side") or op2.get("side") or "")
-                if dn and ds:
-                    self.cube_store.drop(op2["cube_id"], dn, ds)
-                    self._cube_log(agv_id,
-                                   f"📦 K{op2['cube_id']} bırakıldı: {dn}·"
-                                   f"{SIDE_LABELS_TR.get(ds, ds)}")
+            self.cube_ops.pop(agv_id, None)
+            dn = str(op2.get("drop_node") or op2.get("node") or "")
+            ds = str(op2.get("drop_side") or op2.get("side") or "")
+            if dn and ds:
+                self.cube_store.drop(op2["cube_id"], dn, ds)
+                self._cube_log(agv_id,
+                               f"📦 K{op2['cube_id']} bırakıldı: {dn}·"
+                               f"{SIDE_LABELS_TR.get(ds, ds)}")
+            self._cube_search_cleanup(agv_id)
             self._cubes_redraw()
 
         self.after(settle_ms, _do_release)
@@ -3486,6 +3539,14 @@ class AGVControlApp(ctk.CTk):
                                 self._planner_tick_and_dispatch()
                             else:
                                 self._cam_log_stop_for_agv(s.id)
+                                # BUG-2: koptuğunda küp operasyonunu iptal et —
+                                # yoksa cube_ops'ta zombi op kalır (180s'e kadar),
+                                # mıknatıs/kapma yarıda kalır. Mıknatısı kapat
+                                # (HTTP-direct, WS gerekmez) + kontrolörü durdur.
+                                if s.id in self.cube_ops:
+                                    self._pickup_stop(s.id)
+                                    self._arm_http_get(s.id, "/magnet?s=0")
+                                    self._cube_op_fail(s.id, "AGV bağlantısı koptu")
                         # Planner drift correction: AGV gercek pozisyonu planner'in
                         # bildiginden farkliysa senkronla. (Connected AGV'ler icin.)
                         # '?' (bilinmeyen konum sentineli) planner'a sizmasin (FP-10).
