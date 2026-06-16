@@ -1,23 +1,8 @@
 """
-Waypoint Harita Widget
-======================
-A-I waypoint grafini Tkinter Canvas uzerinde cizer.
-- Mevcut konum yesil dolu daire
-- Hedef kirmizi halka
-- Yol sari kalin kenar
-- Aracin yonu ortada ok
-- Bir node'a tiklayinca callback ile bildirir (hedef ayarlamak icin)
+Waypoint harita widget'i — grafı Tkinter Canvas'ta çizer (konum/hedef/yol/yön +
+küp katmanı). Node'a tıklayınca callback; set_fleet_state çoklu AGV, set_cubes +
+begin_placement küp yerleştirme.
 
-Multi-AGV gosterimi icin `set_fleet_state(agvs)` API mevcut.
-
-Kup katmani:
-- `set_cubes([(cube_id, node, side), ...])` — sahadaki kupleri turuncu kare
-  olarak node'un side kenarinda gosterir (her iki cizim modunda).
-- `begin_placement(get_sides_fn, on_pick)` — kup yerlestirme modu: kullanici
-  once node tiklar, sonra cizgisiz kenarlardan birini secer;
-  on_pick(node, side) cagrilir. `cancel_placement()` iptal eder.
-
-Grid (12 kenar — 2026-06 4×3 A-L duzeni):
     A───B───C───D
     │       │
     E───F───G───H
@@ -31,8 +16,7 @@ import customtkinter as ctk
 import tkinter as tk
 
 
-# Waypoint koordinatlari (kanvas uzerinde mantiki konum, 0-1 normalize)
-# (x, y) sol-ust koseden, x sag, y asagi. 4×3 grid (A-L).
+# Waypoint koordinatları (0-1 normalize, x sağ y aşağı, 4×3 grid).
 _WAYPOINTS = {
     "A": (0.12, 0.20), "B": (0.37, 0.20), "C": (0.62, 0.20), "D": (0.87, 0.20),
     "E": (0.12, 0.50), "F": (0.37, 0.50), "G": (0.62, 0.50), "H": (0.87, 0.50),

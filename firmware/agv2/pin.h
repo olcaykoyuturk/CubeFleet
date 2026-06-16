@@ -14,13 +14,10 @@
 // =============================================================================
 
 // ===== MUX Pinleri (74HC4051) =====
-// AGV_2'de GPIO 5 SPI library default SS'idir; SPI.begin sonrasında her
-// transferde MUX_S2'yi bozuyor. Pin GPIO 27'ye taşındı (boş, strapping
-// değil, hiçbir modülle çakışmaz).
 #define MUX_S0    16
 #define MUX_S1    17
-#define MUX_S2    27   // ⚠ AGV_1: GPIO 5 → AGV_2: GPIO 27 (SPI çakışması yüzünden)
-#define MUX_SIG   34   // Analog giriş (GPIO34 input-only)
+#define MUX_S2    27   
+#define MUX_SIG   34
 
 // ===== Motor Pinleri (ZK-BM1 10A Sürücü) =====
 #define MOTOR_L1  32   // Sol IN1

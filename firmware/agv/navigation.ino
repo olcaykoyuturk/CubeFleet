@@ -53,8 +53,8 @@ static const char* headingToStr(Heading h) {
 }
 const char* getHeadingName() { return headingToStr(heading); }
 
-// Saat yönünde 90°'de o yönde komşu çizgi var mı?
-// turn180'de sensorFindLine'ın ara çizgide durup durmayacağını belirler.
+// O yönde komşu çizgi var mı? turn180'de sensorFindLine'ın ara çizgide takılıp
+// takılmayacağını belirler.
 static bool hasNeighborAt(char wp, Heading dir) {
     for (int i = 0; i < NUM_WAYPOINTS; i++) {
         if (WAYPOINT_MAP[i].name != wp) continue;
@@ -69,6 +69,16 @@ static bool hasNeighborAt(char wp, Heading dir) {
 // Sensör tabanlı dönüş yardımcıları
 // =============================================================================
 
+// Dönüş hızı (executeSpinTurn her dönüş başında ayarlar):
+//  - yük alındığı node'daki ilk dönüş: boost (50/40), tek seferlik
+//  - yük taşırken sonraki dönüşler: carry (35/30)
+//  - yük yokken: normal (TURN_SPEED / TURN_SPEED_SLOW)
+// PC yük alınca "boostTurn", bırakınca "carryOff" gönderir.
+static int  turnSpeedNow     = TURN_SPEED;
+static int  turnSpeedSlowNow = TURN_SPEED_SLOW;
+static bool boostNextTurn    = false;
+static bool carryingLoad     = false;
+
 static bool sensorExitLine(bool turnRight) {
     unsigned long noLineStart = 0;
     bool counting = false;
@@ -78,7 +88,7 @@ static bool sensorExitLine(bool turnRight) {
         webSocketLoop();
         if (navState == NAV_IDLE) return false;
 
-        turnRight ? motorTurnRight(TURN_SPEED) : motorTurnLeft(TURN_SPEED);
+        turnRight ? motorTurnRight(turnSpeedNow) : motorTurnLeft(turnSpeedNow);
         readCalibratedSensors();
 
         bool onLine = sensorCalibrated[MID_LEFT_SENSOR]  > LINE_THRESHOLD ||
@@ -113,7 +123,7 @@ static bool sensorFindLine(bool turnRight) {
         }
 
         // Çizgi sezilince anında yavaş hıza in (atalete yetişmek için).
-        int curSpeed = anyLine ? TURN_SPEED_SLOW : TURN_SPEED;
+        int curSpeed = anyLine ? turnSpeedSlowNow : turnSpeedNow;
         turnRight ? motorTurnRight(curSpeed) : motorTurnLeft(curSpeed);
 
         bool onLine = sensorCalibrated[MID_LEFT_SENSOR]  > LINE_THRESHOLD ||
@@ -163,12 +173,25 @@ static void centerOnLine() {
 // Tek dönüş motoru (90° / 180° hepsi)
 // =============================================================================
 
-// Spin turn: exitLine + findLine adımları toplam 'segments' kez tekrar.
-// 90° → 1 segment, 180° (varsa ara çizgi) → 2 segment.
-// headingDelta: heading update miktarı (-1 = sol 90°, +1 = sağ 90°, +2 = 180°)
+// Spin turn: exitLine + findLine adımları 'segments' kez tekrarlanır.
+// 90° = 1 segment, 180° (ara çizgi varsa) = 2 segment.
+// headingDelta: heading güncelleme miktarı (-1 sol 90°, +1 sağ 90°, +2 180°)
 static bool executeSpinTurn(bool turnRight, int segments, int headingDelta,
                             const char* tag) {
     motorStop(); webSocketLoop(); delay(50);
+
+    // Bu dönüşün hızı: ilk dönüş en güçlü, taşırken orta, yük yoksa normal.
+    if (boostNextTurn) {
+        turnSpeedNow     = BOOST_TURN_SPEED;
+        turnSpeedSlowNow = BOOST_TURN_SPEED_SLOW;
+        boostNextTurn    = false;   // tek seferlik (sonraki dönüşler carry)
+    } else if (carryingLoad) {
+        turnSpeedNow     = CARRY_TURN_SPEED;
+        turnSpeedSlowNow = CARRY_TURN_SPEED_SLOW;
+    } else {
+        turnSpeedNow     = TURN_SPEED;
+        turnSpeedSlowNow = TURN_SPEED_SLOW;
+    }
 
     for (int s = 0; s < segments; s++) {
         if (!sensorExitLine(turnRight)) {
@@ -191,10 +214,10 @@ static bool executeSpinTurn(bool turnRight, int segments, int headingDelta,
     return true;
 }
 
-// ZAMANLI 90° dönüş — çizgi OLMAYAN yöne (küp tarafı). SABİT TIMED_TURN90_MS
-// kadar döner, sonra durur. STOP her an işler (navCommandStop navState'i IDLE
-// yapar → döngü kırılır). Dönüşte biriken küçük açı hatası kalıcı DEĞİL: bir
-// sonraki sensörlü dönüş (setHop ilk dönüşü) çizgiye kilitlenirken sıfırlar.
+// Zamanlı 90° dönüş — çizgisiz yöne (küp tarafı). Sabit TIMED_TURN90_MS kadar
+// döner. STOP her an işler (navCommandStop navState'i IDLE yapar, döngü kırılır).
+// Biriken küçük açı hatası kalıcı değil: sonraki sensörlü dönüş çizgiye
+// kilitlenirken sıfırlar.
 static bool timedTurn90(bool turnRight) {
     motorStop(); webSocketLoop(); delay(50);
     unsigned long start = millis();
@@ -212,7 +235,7 @@ static bool timedTurn90(bool turnRight) {
 static void turnLeft90()         { executeSpinTurn(false, 1, -1, "SOLA"); }
 static void turnRight90()        { executeSpinTurn(true,  1, +1, "SAGA"); }
 static void turn180(char wp) {
-    // Saat yönünde 90°'de komşu çizgi varsa ara çizgide takılırız → 2 segment.
+    // Saat yönünde komşu çizgi varsa ara çizgide takılırız: 2 segment gerekir.
     Heading cwDir   = (Heading)((heading + 1) % 4);
     bool hasMidLine = hasNeighborAt(wp, cwDir);
     executeSpinTurn(true, hasMidLine ? 2 : 1, +2, "180");
@@ -234,15 +257,14 @@ static void executeTurn(Heading targetDir, char wp = 0) {
 // faceDir — küp yönüne dönüş (NAV_IDLE'da, PC komutuyla)
 // =============================================================================
 
-// Bekleyen faceDir istegi (-1 = yok). webSocket handler navCommandFaceDir ile
-// yazar; handleIdle bir sonraki loop'ta yurutur (facade deseni).
+// Bekleyen faceDir isteği (-1 = yok). navCommandFaceDir yazar, handleIdle
+// sonraki loop'ta yürütür (facade).
 static int facePendingDir = -1;
 
-// Hedef yone don: her 90° segment icin o yonde CIZGI varsa sensorlu donus
-// (hassas + ortalamayi besler), yoksa ZAMANLI donus (ogrenilen sure).
-// 180° = iki segment (saat yonu). Bitince faceComplete PC'ye gider.
-// navState yurutme boyunca NAV_TURNING yapilir ki navCommandStop (IDLE set
-// eder) donusu her an kesebilsin; sonunda IDLE'a doner.
+// Hedef yöne dön: her 90° segment için o yönde çizgi varsa sensörlü (hassas),
+// yoksa zamanlı dönüş. 180° = iki segment. Bitince faceComplete PC'ye gider.
+// Yürütme boyunca navState = NAV_TURNING; navCommandStop (IDLE set eder) dönüşü
+// her an keser. Sonunda IDLE'a döner.
 static void executeFaceDir(Heading target) {
     if (target == heading) {
         sendFaceComplete(currentWaypoint, headingToStr(heading));
@@ -277,8 +299,8 @@ static void executeFaceDir(Heading target) {
     sendFaceComplete(currentWaypoint, headingToStr(heading));
 }
 
-// Komut arayuzu: 'N'/'E'/'S'/'W' karakteriyle cagrilir (websocket.ino).
-// Yalniz NAV_IDLE'da kabul — gorev ortasinda kup donusu anlamsiz/tehlikeli.
+// Komut arayüzü: 'N'/'E'/'S'/'W' ile çağrılır (websocket.ino).
+// Yalnız NAV_IDLE'da kabul — görev ortasında küp dönüşü tehlikeli.
 void navCommandFaceDir(char dirChar) {
     int d = -1;
     switch (dirChar) {
@@ -288,8 +310,8 @@ void navCommandFaceDir(char dirChar) {
         case 'W': d = WEST;  break;
     }
     if (d < 0) { sendLog("faceDir: gecersiz yon"); return; }
-    // NAV_REACHED da kabul: hopComplete ile faceDir arasinda firmware henuz
-    // handleReached'i islememis olabilir (setHop race-guard ile ayni mantik).
+    // NAV_REACHED de kabul: hopComplete ile faceDir arasında firmware henüz
+    // handleReached'i işlememiş olabilir (setHop race-guard'la aynı mantık).
     if (navState != NAV_IDLE && navState != NAV_REACHED) {
         sendLog("faceDir reddedildi: arac mesgul");
         return;
@@ -340,9 +362,6 @@ static void searchForLine() {
 // Kavşak İşleyici
 // =============================================================================
 
-// Yolu logla yardimcisi setTarget ile birlikte kaldirildi — setHop kendi
-// detayli log mesajini icerir.
-
 static void handleJunction() {
     // 1. RFID konumunu uygula
     char prevWP = currentWaypoint;
@@ -354,9 +373,8 @@ static void handleJunction() {
         char buf[32]; sprintf(buf, "RFID: %c", rfidWP);
         sendLog(buf);
 
-        // Planner senkronizasyonu: hop tamamlandi bildir.
-        // Multi-AGV mod kullanilmasa bile bu mesaj zararsiz — PC tarafi planner
-        // tutmadigi AGV'ler icin sessizce gormezden gelir.
+        // Planner'a hop tamamlandı bildir. Çoklu AGV modu kullanılmasa bile
+        // zararsız — PC planner tutmadığı AGV'leri sessizce yok sayar.
         sendHopComplete(rfidWP, headingToStr(heading));
 
         // Yön kalibrasyonu (önceki node ile şimdiki arasından)
@@ -383,14 +401,13 @@ static void handleJunction() {
     // 3. Yolda ilerle
     navPathIndex++;
     if (navPathIndex >= navPathLength) {
-        // navPath sona vardi ama hedefe ulasilamadi — muhtemelen PC'nin
-        // continuous update mesaji (after=D) bize gec ulasti. Kisa sure
-        // webSocketLoop ile bekle, gelirse navPath uzar ve devam edilir.
+        // navPath bitti ama hedefe ulaşılamadı — muhtemelen PC'nin continuous
+        // update mesajı geç geldi. Kısa süre webSocketLoop ile bekle; gelirse
+        // navPath uzar ve devam edilir.
         sendLog("Yol son node'a vardi, setHop bekleniyor...");
         motorStop();
         unsigned long waitStart = millis();
-        // 3 saniye bekle — WS gecikmesi (ESP32 + server queue) ~1s olabilir,
-        // 1.5s yetmedi. 3s genelde yeterli, AGV continuous hop'u yakalar.
+        // 3 sn bekle — WS gecikmesi (ESP32 + server queue) ~1s, 1.5s yetmedi.
         const unsigned long SETHOP_WAIT_MS = 3000;
         while (millis() - waitStart < SETHOP_WAIT_MS) {
             webSocketLoop();
@@ -410,8 +427,7 @@ static void handleJunction() {
     char nextWP = navPath[navPathIndex];
     Heading targetDir;
     if (!getDirection(currentWaypoint, nextWP, &targetDir)) {
-        // Beklenmedik kart — PC drift correction devreye girip yeni setHop
-        // gonderene kadar dur.
+        // Beklenmedik kart — PC drift düzeltmesi yeni setHop gönderene kadar dur.
         char rbuf[80];
         snprintf(rbuf, sizeof(rbuf),
                  "Beklenmedik node %c (next=%c): PC'ye bildirildi, IDLE",
@@ -430,7 +446,7 @@ static void handleJunction() {
              headingToStr(targetDir));
     sendLog(buf);
 
-    // Kart kavşak köşesinde okunuyor → ileri gitmeden direkt dönüş.
+    // Kart kavşak köşesinde okunuyor: ileri gitmeden direkt dön.
     sendLog("[KAVSAK] Donus basliyor (kart konumda)");
     executeTurn(targetDir, currentWaypoint);
     if (navState == NAV_IDLE) return;
@@ -446,8 +462,13 @@ static void handleJunction() {
 
 // runNavigation öncesi ortak kontroller. AGV durdurulması gerekiyorsa false.
 static bool preNavigationChecks() {
-    // Engel SADECE NAV_FOLLOWING'de aktif (dönüşlerde çevre objelerini yok say)
-    if (navState == NAV_FOLLOWING && isObstacleDetected()) {
+    // Engele sadece çizgi takip ederken bakılır (dönüşte çevreyi yok say).
+    // Son hop'ta (sıradaki node hedefse) engele bakma: AGV zaten orada duracak,
+    // ötesindeki küp yolu kapatmaz. Ara hop'larda açık.
+    bool finalHop = (targetWaypoint != 0
+                     && navPathLength > navPathIndex
+                     && navPath[navPathIndex] == targetWaypoint);
+    if (navState == NAV_FOLLOWING && !finalHop && isObstacleDetected()) {
         motorStop();
         if (!nav.obstacleLogged) {
             sendLog("Engel algilandi! Bekleniyor...");
@@ -538,8 +559,8 @@ static void handleReached() {
 static void handleIdle() {
     motorStop();
 
-    // Bekleyen faceDir istegi varsa yurut (kup yonune donus — bloklayan ama
-    // STOP-kesilebilir; bitince/iptal edilince IDLE'a doner).
+    // Bekleyen faceDir isteğini yürüt (küp yönüne dönüş — bloklar ama STOP ile
+    // kesilebilir; bitince/iptalde IDLE'a döner).
     if (facePendingDir >= 0) {
         Heading t = (Heading)facePendingDir;
         facePendingDir = -1;
@@ -547,12 +568,10 @@ static void handleIdle() {
         return;
     }
 
-    // IDLE'da SÜREKLI RFID polling (her 200 ms). AGV bir karta yerleştirilirse
-    // konum hemen güncellenir — kullanıcı manuel setPosition yapmasına gerek yok.
-    // Manuel navCommandSetPosition yine çalışır (last-write-wins).
-    //
-    // Filtre: sadece konum DEĞIŞTIĞINDE update + log (aynı kart üst üste okunsa
-    // sessiz). currentWaypoint != rfidWP kontrolü bu spam'i engeller.
+    // IDLE'da her 200 ms RFID polling. AGV bir karta yerleştirilirse konum
+    // hemen güncellenir; manuel setPosition yine çalışır (last-write-wins).
+    // Sadece konum değişince update + log (currentWaypoint != rfidWP filtresi
+    // aynı kartın tekrar okunmasında log spam'ini önler).
     if (millis() - nav.lastIdleRfidMs >= 200) {
         nav.lastIdleRfidMs = millis();
         char rfidWP = 0;
@@ -582,9 +601,9 @@ void navigationInit() {
 }
 
 void runNavigation() {
-    // IDLE state'i HER ZAMAN çalıştır — kalibrasyon/target/connect gerektirmez.
-    // Sadece motorStop + RFID polling yapıyor; AGV açıldığında bir karta
-    // yerleştirilirse konum hemen tespit edilir (kalibrasyondan ÖNCE bile).
+    // IDLE state'i her zaman çalıştır — kalibrasyon/target/connect gerektirmez.
+    // Sadece motorStop + RFID polling; AGV bir karta yerleştirilirse konum
+    // kalibrasyondan önce bile tespit edilir.
     if (navState == NAV_IDLE) {
         handleIdle();
         return;
@@ -641,21 +660,32 @@ void navCommandSetSpeed(int speed) {
     sendLog(buf);
 }
 
+// Yük alındı: ilk dönüş boost + taşıma modu açık (sonraki dönüşler carry).
+void navCommandBoostTurn() {
+    boostNextTurn = true;
+    carryingLoad  = true;
+}
+
+// Yük bırakıldı: taşıma modu kapanır, dönüşler normale döner.
+void navCommandCarryOff() {
+    boostNextTurn = false;
+    carryingLoad  = false;
+}
+
 void navCommandCalibrate() {
-    // Re-entry guard: runManualCalibration() içinde webSocketLoop() çağrılıyor,
-    // bu sırada gelen yeni "calibrate" komutu recursive çağrı yapardı (kullanıcı
-    // butona art arda basarsa kalibrasyon hep yeniden başlardı, asla bitmezdi).
-    // Statik bayrak ile yeni çağrıları engelle.
+    // Re-entry guard: runManualCalibration() içindeki webSocketLoop() sırasında
+    // gelen yeni "calibrate" komutu recursive çağrı yapardı (kullanıcı butona
+    // art arda basarsa kalibrasyon asla bitmezdi). Statik bayrak engeller.
     static bool calibrating = false;
     if (calibrating) {
         sendLog("Kalibrasyon devam ediyor, yeni komut yoksayildi");
         return;
     }
     calibrating = true;
-    calibrationActive = true;   // webSocketLoop sendStatus'u atlasin — WS trafigi dussun
+    calibrationActive = true;   // webSocketLoop sendStatus'u atlasın, WS trafiği düşsün
 
-    // Kalibrasyon hazırlığı — motorlari sessizce durdur (navCommandStop "Durduruldu"
-    // log'u atiyor, bu kullaniciya "iptal oldu" gibi gorunuyor)
+    // Motorları sessizce durdur (navCommandStop "Durduruldu" log'u atıyor, bu
+    // kullanıcıya iptal olmuş gibi görünüyor).
     sendLog("Kalibrasyon basliyor — araci cizgi/zemin uzerinde gezdir (~8 sn)");
     motorStop();
     navState = NAV_IDLE;
@@ -670,11 +700,10 @@ void navCommandCalibrate() {
     calibrating = false;
 }
 
-// PC'den gelen preset'i runtime'da uygula. NVS'ye yazmaz; reboot'ta uçar.
-// Doğrulama: her sensör için max-min >= CALIB_MIN_RANGE olmalı. Aksi halde reddet.
-// GUARD: Aktif kalibrasyon sirasinda reddet — yoksa runManualCalibration'in
-// guncellemekte oldugu calibData.minVal/maxVal araylarını ezer, hibrit/bozuk
-// kalibrasyon ortaya cikar.
+// PC'den gelen preset'i runtime'da uygula. NVS'ye yazmaz, reboot'ta uçar.
+// Doğrulama: her sensör için max-min >= CALIB_MIN_RANGE olmalı.
+// Aktif kalibrasyon sırasında reddet — yoksa runManualCalibration'ın güncellediği
+// calibData.minVal/maxVal dizilerini ezer, bozuk kalibrasyon çıkar.
 bool navCommandApplyCalibration(const int* minVals, const int* maxVals) {
     if (calibrationActive) {
         sendLog("applyCalibration: kalibrasyon devam ediyor, reddedildi");
@@ -709,15 +738,14 @@ bool navCommandApplyCalibration(const int* minVals, const int* maxVals) {
 // Multi-AGV Planner emirleri
 // =============================================================================
 
-// Planner'in 2-hop look-ahead emri. from = mevcut konum dogrulamasi (RFID ile
-// senkron tutariz), next = simdi gitilecek waypoint, after = sonraki (0 ise
-// next'te durup hopComplete sonrasi bekler).
+// Planner'ın look-ahead hop emri. from = konum doğrulaması (RFID ile senkron),
+// next = şimdi gidilecek waypoint, after = sonraki (0 ise next'te durup
+// hopComplete sonrası bekler).
 //
-// Idempotency + continuous hop davranisi:
-//   - Eger AGV halihazirda from→next yapiyorsa (NAV_FOLLOWING/TURNING/JUNCTION),
-//     state'i bozmadan sadece after'i guncelle → AGV duruksuz devam.
-//   - Aksi: tam yeni hop (NAV_TURNING'e gec).
-// Detayli debug log icin state ismi
+// Idempotency / continuous hop:
+//   - AGV zaten from->next yapıyorsa (NAV_FOLLOWING/TURNING/JUNCTION), state'i
+//     bozmadan sadece after'ı güncelle (AGV duraksamaz).
+//   - Değilse: tam yeni hop (NAV_TURNING).
 static const char* navStateName(NavState s) {
     switch (s) {
         case NAV_IDLE:        return "IDLE";
@@ -731,7 +759,7 @@ static const char* navStateName(NavState s) {
 }
 
 void navCommandHop(char from, char next, char after, char after2, char goal) {
-    // ===== DETAYLI LOG: gelen emrin tam bilgisi =====
+    // Gelen emrin tam bilgisini logla
     char dlog[128];
     snprintf(dlog, sizeof(dlog),
              "[HOP-IN] from=%c next=%c after=%c after2=%c goal=%c | AGV=%c state=%s "
@@ -744,13 +772,13 @@ void navCommandHop(char from, char next, char after, char after2, char goal) {
                  ? navPath[navPathIndex] : '-');
     sendLog(dlog);
 
-    // Safety: from==next anlamsiz.
+    // from==next anlamsız.
     if (from == next) {
         sendLog("setHop: from==next, gozardi");
         return;
     }
 
-    // Konum dogrulama
+    // Konum doğrulama
     if (currentWaypoint == 0) {
         currentWaypoint = from;
     } else if (currentWaypoint != from) {
@@ -762,7 +790,7 @@ void navCommandHop(char from, char next, char after, char after2, char goal) {
         return;
     }
 
-    // Idempotent / continuous hop: AGV zaten from→next yapiyor mu?
+    // Idempotent / continuous hop: AGV zaten from->next yapıyor mu?
     bool sameHop = (currentWaypoint == from
                     && navPathLength > navPathIndex
                     && navPath[navPathIndex] == next);
@@ -771,7 +799,7 @@ void navCommandHop(char from, char next, char after, char after2, char goal) {
                     || navState == NAV_AT_JUNCTION);
 
     if (sameHop && moving) {
-        // Continuous update — after + after2'yi guncelle (3-hop look-ahead).
+        // Continuous update — after + after2'yi güncelle (3-hop look-ahead).
         int afterIdx = navPathIndex + 1;
         if (after != 0 && afterIdx < MAX_PATH_LENGTH) {
             navPath[afterIdx] = after;
@@ -794,12 +822,10 @@ void navCommandHop(char from, char next, char after, char after2, char goal) {
         return;
     }
 
-    // ===== RACE GUARD =====
-    // NAV_FOLLOWING / NAV_TURNING / NAV_LINE_SEARCH durumlarinda yeni full
-    // hop reddedilir (AGV yolda iken ters yone donmek zorunda kalir).
-    // NAV_AT_JUNCTION ise AGV junction'da yeni setHop BEKLIYOR (handleJunction
-    // wait loop) → kabul et. NAV_IDLE / NAV_REACHED zaten kabul.
-    // Continuous hop (sameHop branch) yukarida zaten ele alindi.
+    // Race guard: NAV_FOLLOWING / NAV_TURNING / NAV_LINE_SEARCH'te yeni full hop
+    // reddedilir (yoksa AGV yoldayken ters yöne dönmek zorunda kalır).
+    // NAV_AT_JUNCTION'da AGV zaten setHop bekliyor (handleJunction wait loop), kabul.
+    // NAV_IDLE / NAV_REACHED zaten kabul; continuous hop yukarıda ele alındı.
     if (navState == NAV_FOLLOWING ||
         navState == NAV_TURNING ||
         navState == NAV_LINE_SEARCH) {
@@ -811,8 +837,8 @@ void navCommandHop(char from, char next, char after, char after2, char goal) {
         return;
     }
 
-    // Fresh full hop. navPath[0]=current, navPath[1]=hedef.
-    // navPathIndex=1 (sonraki hedef konvansiyonu — handleTurning idempotent).
+    // Fresh full hop. navPath[0]=current, navPath[1]=hedef, navPathIndex=1
+    // (sonraki hedef konvansiyonu, handleTurning idempotent).
     navPath[0]    = from;
     navPath[1]    = next;
     navPathLength = 2;
@@ -825,8 +851,8 @@ void navCommandHop(char from, char next, char after, char after2, char goal) {
         }
     }
     navPathIndex   = 1;
-    // targetWaypoint: mission goal varsa o (REACHED check sadece gercek
-    // hedefte tetiklensin), yoksa lokal after2/after/next
+    // targetWaypoint: mission goal varsa o (REACHED sadece gerçek hedefte
+    // tetiklensin), yoksa lokal after2/after/next
     targetWaypoint = (goal != 0) ? goal
                    : ((after2 != 0) ? after2 : ((after != 0) ? after : next));
     isTarget       = true;

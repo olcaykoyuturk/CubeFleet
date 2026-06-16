@@ -8,9 +8,8 @@
 bool wifiInit() {
     WiFi.mode(WIFI_STA);
 
-    // WiFi modem sleep'i kapat — periyodik clock dusurmesi LEDC PWM
-    // zamanlamasini bozar, DS3225 gibi hassas servolarda titreme yapar.
-    // Modem hep uyanik kalir, ~10-20 mA daha cok ceker (ihmal edilebilir).
+    // modem sleep kapali — yoksa periyodik clock dipi LEDC PWM zamanlamasini
+    // bozup DS3225'te titreme yapiyor. Karsiligi ~10-20 mA fazla cekim.
     WiFi.setSleep(false);
 
     IPAddress local(192, 168, 4, CAM_IP_OCT_4);
@@ -35,8 +34,8 @@ bool wifiInit() {
         return false;
     }
 
-    // Baglandiktan sonra tekrar setSleep(false) — bazi core surumlerinde
-    // baglanti sirasinda sleep modu kendiliginden aciliyor.
+    // tekrar setSleep(false) — bazi core surumlerinde baglanti sirasinda
+    // sleep kendiliginden aciliyor.
     WiFi.setSleep(false);
     return true;
 }

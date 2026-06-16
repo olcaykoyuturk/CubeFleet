@@ -6,15 +6,24 @@
 // =============================================================================
 
 // ===== Navigasyon / Dönüş =====
-// Ağır araç (1 kg) statik sürtünmeyi yenmek için 22 PWM gerek
-#define TURN_SPEED                25   // Dönüş başlangıç PWM hızı (statik sürtünmeyi yenmek için)
-#define TURN_SPEED_SLOW           20   // Çizgi yaklaşınca yavaşlama hızı (hassas hizalama)
+// ⚠ Sadece DÖNÜŞ hızları AGV1'in %22 ALTINDA = AGV1 × 0.78 (en yakın tama
+// yuvarlı) → AGV2 dönüşlerde %22 yavaş. Base/düz hız AGV1 ile AYNI (aşağıda 40).
+// Bilinçli per-araç fark (MUX_S2 gibi). AGV1 değişirse burayı yeniden ölçekle.
+//   AGV1: dönüş 45→35, boost 50→40, yükte 50→38
+#define TURN_SPEED                35   // 45 × 0.78
+#define TURN_SPEED_SLOW           27   // 35 × 0.78 (çizgiye yaklaşınca)
+// Yük alındığı node'daki İLK dönüş — kalkış için en güçlü.
+#define BOOST_TURN_SPEED          39   // 50 × 0.78
+#define BOOST_TURN_SPEED_SLOW     31   // 40 × 0.78
+// Yük taşırken (ilk dönüşten sonra, bırakana kadar) tüm dönüşler.
+#define CARRY_TURN_SPEED          39   // 50 × 0.78
+#define CARRY_TURN_SPEED_SLOW     30   // 38 × 0.78
 #define TURN_TIMEOUT            5000   // Maksimum dönüş süresi (ms) — ağır araç biraz uzun döner
 
 // ===== Zamanlı Dönüş (faceDir — küp yönüne, çizgisiz 90°) =====
 // Çizgi OLMAYAN yöne (küp tarafı) dönerken motor SABİT bu süre kadar döner.
-// (Öğrenilen-süre/EMA kaldırıldı — saha tercihi sabit 500 ms.)
-#define TIMED_TURN90_MS 500
+// (Öğrenilen-süre/EMA kaldırıldı — saha tercihi sabit 680 ms.)
+#define TIMED_TURN90_MS 680
 
 // ===== Debounce =====
 #define LINE_EXIT_MS   200   // Çizgiden çıkış: bu kadar ms çizgi görünmemeli
@@ -38,12 +47,12 @@
 #define PING_INTERVAL    5000   // Canlı kalma ping aralığı (ms)
 
 // ===== Varsayılan PID Değerleri =====
-#define PID_DEFAULT_KP   0.008f
+#define PID_DEFAULT_KP   0.010f
 #define PID_DEFAULT_KI   0.000f
 #define PID_DEFAULT_KD   0.003f
 
 // ===== Varsayılan Hız =====
-#define DEFAULT_BASE_SPEED   30   // Temel motor PWM hızı
+#define DEFAULT_BASE_SPEED   40   // AGV1 ile AYNI (düz hız ölçeklenmedi)
 
 // ===== Motor Trim (Düz Gidiş Dengesi) =====
 // Araç sağa kayıyorsa: pozitif artır (+2, +4...)

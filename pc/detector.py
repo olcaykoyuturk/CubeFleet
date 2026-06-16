@@ -54,9 +54,9 @@ class Detection:
         return max(0, (self.x2 - self.x1) * (self.y2 - self.y1))
 
     def aim_point(self, k: float) -> tuple:
-        """Magnet hedef noktasi: bbox merkezi yerine biraz YUKARISI (cy - height*k).
-        Kamera kola monteli ve kupe yaklasinca magnet kupun ust yuzune denk gelsin diye
-        dikey offset uygulanir. k=0 → tam merkez, k arttikca daha yukari (bbox ustune)."""
+        """Magnet hedef noktasi: bbox merkezinin biraz yukarisi (cy - height*k).
+        Kamera kola monteli; kupe yaklasinca magnet kupun ust yuzune denk gelsin
+        diye dikey offset. k=0 → tam merkez, k arttikca yukari (bbox ustune)."""
         return (self.cx, int(self.cy - self.height * k))
 
 
@@ -147,8 +147,8 @@ class CubeDetector:
 
     def draw(self, frame: np.ndarray, dets: List[Detection],
              aim_k: Optional[float] = None) -> np.ndarray:
-        """bbox + merkez crosshair + label cizer. aim_k verilirse her tespit icin
-        ayrica magnet aim-point'i (sari) cizer — otonom kapma hedef noktasini gosterir."""
+        """bbox + merkez crosshair + label cizer. aim_k verilirse her tespit
+        icin magnet aim-point'i (sari) de cizer (otonom kapma hedef noktasi)."""
         for d in dets:
             cv2.rectangle(frame, (d.x1, d.y1), (d.x2, d.y2), COL_BBOX, 2)
             cv2.drawMarker(frame, (d.cx, d.cy), COL_CENTER,

@@ -55,6 +55,25 @@ struct AGVClient {
 
 AGVClient agvs[MAX_AGVS];
 
+// ===== PC istemci takibi =====
+// Telemetri sadece PC'ye gider — herkese broadcast WS kuyruğunu doldurup frame
+// düşürüyordu. Komutlar zaten hedefli; pcHeartbeat textAll kalır.
+#define MAX_PC 3
+uint32_t pcClients[MAX_PC] = {0, 0, 0};
+
+void markPC(uint32_t cid) {
+    for (int i = 0; i < MAX_PC; i++) if (pcClients[i] == cid) return;
+    for (int i = 0; i < MAX_PC; i++) if (pcClients[i] == 0) { pcClients[i] = cid; return; }
+}
+void unmarkPC(uint32_t cid) {
+    for (int i = 0; i < MAX_PC; i++) if (pcClients[i] == cid) pcClients[i] = 0;
+}
+void sendToPC(const char* msg, size_t len) {
+    for (int i = 0; i < MAX_PC; i++)
+        if (pcClients[i] != 0) ws.text(pcClients[i], msg, len);
+}
+void sendToPC(const String& msg) { sendToPC(msg.c_str(), msg.length()); }
+
 // ===== Fonksiyon Prototipleri =====
 void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
                       AwsEventType type, void *arg, uint8_t *data, size_t len);
@@ -90,6 +109,8 @@ void setup() {
     // Parametreler: ssid, pass, channel, hidden, max_connection
     // 3 AGV + 3 ESP32-CAM + 1 PC = 7 cihaz icin max=8 ayarliyoruz
     WiFi.softAP(AP_SSID, AP_PASS, 1, 0, 8);
+    // Modem sleep kapalı — yoksa AP ara sıra paket kaçırıp bağlantı düşürüyor.
+    WiFi.setSleep(false);
 
     Serial.print("AP IP adresi: ");
     Serial.println(WiFi.softAPIP());
@@ -146,6 +167,7 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
                     agvs[idx].connected = false;
                     broadcastAGVList();
                 }
+                unmarkPC(client->id());   // PC ayrildiysa listeden dus
             }
             break;
 
@@ -229,6 +251,8 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
         // lastPCActivityMs guncel tutar. Tum clientlere broadcast — AGV'ler
         // PC kaynakli mesaj olarak gorur, ekstra tip kontrolu firmware'de.
         // (Hafif: <30 byte, 1.5sn periyot = ~20 byte/sn ek trafik.)
+        // Gondereni PC olarak isaretle (getList kacsa bile burdan yakalanir).
+        markPC(client->id());
         ws.textAll(message);
     }
     else if (type == "status") {
@@ -272,10 +296,8 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
     }
     else if (type == "calibrationData") {
         // AGV manuel kalibrasyonu bitirdi, ham min/max degerlerini PC'ye yolla.
-        // Server bunu sadece tum clientlere broadcast eder; PC dinler + preset
-        // olarak kaydedebilir.
-        ws.textAll(message);
-        Serial.printf("[CALIB] %s'ten kalibrasyon verisi alindi, broadcast edildi\n",
+        sendToPC(message);
+        Serial.printf("[CALIB] %s'ten kalibrasyon verisi alindi, PC'ye yollandi\n",
                      doc["agvId"].as<String>().c_str());
     }
 
@@ -377,11 +399,8 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
     }
     // ===== Multi-AGV Planner mesajlari (PC -> AGV) =====
     else if (type == "setHop") {
-        // PC planner'dan gelen 3-hop look-ahead emir.
-        // payload: {type:"setHop", agvId, from, next, after?, after2?, goal?}
-        // AGV from'dan next'e cizgi takibiyle gider, kavsakta after/after2 icin
-        // yon doner. goal: mission nihai hedefi — "Hedefe ulasildi" kontrolu buna.
-        // message AYNEN forward edilir (after2 dahil her alan otomatik gecer).
+        // PC planner'dan gelen look-ahead emir. payload: {agvId, from, next,
+        // after?, goal?}. Mesajı olduğu gibi hedef AGV'ye yönlendiriyoruz.
         String agvId = doc["agvId"].as<String>();
         int idx = findAGVById(agvId);
         if (idx >= 0 && agvs[idx].connected) {
@@ -408,8 +427,8 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
     else if (type == "hopComplete") {
         // AGV bir hop'u tamamladi, yeni node'da. Planner senkron olmali.
         // payload: {type:"hopComplete", agvId, node, heading?}
-        // calibrationData pattern'i: tum clientlere broadcast.
-        ws.textAll(message);
+        // Yalniz PC dinler — AGV'lere yollamak gereksiz, kuyrugu doldurur.
+        sendToPC(message);
         Serial.printf("[HOP] %s -> %s\n",
                       doc["agvId"].as<String>().c_str(),
                       doc["node"].as<String>().c_str());
@@ -426,16 +445,18 @@ void handleWebSocketMessage(AsyncWebSocketClient *client, uint8_t *data, size_t 
         }
     }
     else if (type == "faceComplete") {
-        // AGV kup yonune donusu bitirdi. hopComplete pattern'i: broadcast.
+        // AGV kup yonune donusu bitirdi. Yalniz PC kapma akisini baslatir.
         // payload: {type:"faceComplete", agvId, node, heading?}
-        ws.textAll(message);
+        sendToPC(message);
         Serial.printf("[FACE] %s @ %s -> %s\n",
                       doc["agvId"].as<String>().c_str(),
                       doc["node"].as<String>().c_str(),
                       doc["heading"].as<String>().c_str());
     }
     else if (type == "getList") {
-        // Dashboard AGV listesi istiyor
+        // Dashboard AGV listesi istiyor — gondereni PC olarak isaretle
+        // (baglanir baglanmaz gelir → telemetri rotasi hemen acilir).
+        markPC(client->id());
         broadcastAGVList();
     }
 }
@@ -468,9 +489,11 @@ void sendAGVUpdate(int idx) {
     JsonArray sensors = doc.createNestedArray("sensors");
     for (int j = 0; j < 8; j++) sensors.add(agvs[idx].sensorValues[j]);
 
-    String output;
-    serializeJson(doc, output);
-    ws.textAll(output);
+    // String yerine static buffer — sürekli String alloc/free heap'i parçalayıp
+    // server'ı reboot ettirebiliyor.
+    static char output[768];
+    size_t n = serializeJson(doc, output, sizeof(output));
+    sendToPC(output, n);
 }
 
 // ===== Log Mesaji Broadcast =====
@@ -481,9 +504,9 @@ void broadcastLog(String agvId, String message) {
     doc["message"] = message;
     doc["time"] = millis();
 
-    String output;
-    serializeJson(doc, output);
-    ws.textAll(output);
+    static char output[512];
+    size_t n = serializeJson(doc, output, sizeof(output));
+    sendToPC(output, n);
 
     Serial.print("[LOG] ");
     Serial.print(agvId);
@@ -527,9 +550,9 @@ void broadcastAGVList() {
         }
     }
 
-    String output;
-    serializeJson(doc, output);
-    ws.textAll(output);
+    static char output[4096];
+    size_t n = serializeJson(doc, output, sizeof(output));
+    sendToPC(output, n);
 }
 
 // ===== Timeout Kontrolu =====

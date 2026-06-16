@@ -1,29 +1,5 @@
 """
 AGV Config Store — Her AGV icin kalici ayarlar (camera URL, vs).
-
-Calibration preset'lerinden ayri ama benzer pattern: JSON dosyasi, atomik save,
-runtime'da RAM'de hizli erisim. Her AGV'nin kendi ESP32-CAM'i oldugu icin
-cam_url + cam_control_url gibi degerler AGV bazinda saklanir.
-
-Format (pc/agv_config.json):
-
-    {
-      "agvs": {
-        "AGV_1": {
-            "cam_stream_url":  "http://192.168.4.50:81/stream",
-            "cam_control_url": "http://192.168.4.50:80"
-        },
-        "AGV_2": {
-            "cam_stream_url":  "http://192.168.4.51:81/stream",
-            "cam_control_url": "http://192.168.4.51:80"
-        }
-      }
-    }
-
-NOT: active_preset zaten calibration_presets.json'da (PresetStore.activePerAgv).
-Bunu burada duplike etmiyoruz — iki dosya farkli sorumlulukta:
-  - calibration_presets.json: sensör kalibrasyon profilleri
-  - agv_config.json:           AGV donanim/baglanti ayarlari (cam, vs)
 """
 
 from __future__ import annotations
@@ -34,8 +10,6 @@ import shutil
 from dataclasses import dataclass
 from typing import Dict
 
-
-# AGV_N icin varsayilan IP eki — N=1 → 50, N=2 → 51, ... CAM_IP_OCT_4 ile uyumlu
 DEFAULT_CAM_IP_BASE = 50
 DEFAULT_CAM_STREAM_PORT  = 81
 DEFAULT_CAM_CONTROL_PORT = 80
@@ -44,7 +18,6 @@ _PC_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def default_cam_ip(agv_id: str) -> str:
-    """AGV_1→.50, AGV_2→.51, ... (CAM_IP_OCT_4 ile uyumlu)."""
     try:
         n = int(agv_id.split("_")[-1])
     except (ValueError, IndexError):
@@ -53,8 +26,7 @@ def default_cam_ip(agv_id: str) -> str:
 
 
 def default_cam_urls(agv_id: str) -> tuple[str, str]:
-    """AGV_1, AGV_2, ... isminden default kamera URL'lerini tahmin et.
-    Kullanici manuel override yapabilir."""
+
     ip = default_cam_ip(agv_id)
     return (
         f"http://{ip}:{DEFAULT_CAM_STREAM_PORT}/stream",
@@ -63,19 +35,11 @@ def default_cam_urls(agv_id: str) -> tuple[str, str]:
 
 
 def pickup_config_path(agv_id: str) -> str:
-    """AGV'nin kol kalibrasyon dosyasi (kinematik + zarf + trim). HER kol
-    fiziksel olarak farkli (servo offset, kamera pozu) → AGV bazinda AYRI
-    dosya, karismasin: pickup_config_AGV_1.json, pickup_config_AGV_2.json, ...
-    pickup_test.py / arm_sim.py / agv_control.py ayni AGV icin ayni dosyayi
-    kullanir."""
     safe = (agv_id or "AGV_1").replace("/", "_").replace("\\", "_")
     return os.path.join(_PC_DIR, f"pickup_config_{safe}.json")
 
 
 def migrate_legacy_pickup_config(agv_id: str = "AGV_1") -> None:
-    """Eski TEK pickup_config.json'i (per-AGV ayrimi oncesi) ilgili AGV'nin
-    dosyasina KOPYALA — bir kez, hedef yoksa. Kullanicinin mevcut AGV_1
-    kalibrasyonu kaybolmasin. Eski dosya yerinde kalir (gitignore)."""
     legacy = os.path.join(_PC_DIR, "pickup_config.json")
     target = pickup_config_path(agv_id)
     if os.path.exists(legacy) and not os.path.exists(target):
@@ -107,7 +71,6 @@ class AGVConfig:
 
     @classmethod
     def default_for(cls, agv_id: str) -> "AGVConfig":
-        """Yeni AGV ilk kez gorunce default URL'lerle olustur."""
         s, c = default_cam_urls(agv_id)
         return cls(agv_id=agv_id, cam_stream_url=s, cam_control_url=c)
 

@@ -1,19 +1,18 @@
 // =============================================================================
 // arm.ino - Robot Kol Kontrolu (4 servo + elektromiknatis)
 //
-// ESP32 core 3.x dahili LEDC API'sini DOGRUDAN kullanir.
-// ESP32Servo kutuphanesi core 3.x ile background interrupt crash'i yaratiyor;
-// bu yuzden kullanmiyoruz.
+// Core 3.x dahili LEDC API'sini dogrudan kullanir. ESP32Servo kutuphanesi
+// core 3.x'te background interrupt crash yaptigi icin kullanilmiyor.
 //
-// Per-servo PWM ayarlari (SERVO_FREQ_HZ + SERVO_PULSE_MIN/MAX tablolarinda):
+// Per-servo PWM (SERVO_FREQ_HZ + SERVO_PULSE_MIN/MAX tablolarinda):
 //   - Base / Elbow / Gripper: 50 Hz @ 500-2500 µs  (MG996R, MG90S)
 //   - Shoulder DS3225:        333 Hz @ 1000-2000 µs (datasheet, 1520 µs neutral)
-//   - PWM cozunurluk: 14-bit (16-bit'te 50 Hz APB clock'tan tam bolunmedigi
-//     icin jitter dogar — 14-bit dijital servo deadband icinde tolere edilebilir)
-//   - ledcAttach farkli frekansli pinleri otomatik ayri timer'a atar
+//   - PWM cozunurluk 14-bit: 50 Hz APB clock'tan tam bolunmedigi icin jitter
+//     dogar; 14-bit dijital servo deadband icinde tolere edilebilir.
+//   - ledcAttach farkli frekansli pinleri otomatik ayri timer'a atar.
 //
 // armUpdate() her loop'ta ramping adimi (1°/servoStepIntervalMs).
-// armGoHome() sequential: ONCE shoulder, sonra base/elbow/gripper (carpisma onleme).
+// armGoHome() sequential: once shoulder, sonra base/elbow/gripper (carpisma onleme).
 // Boot soft-start: ilk PWM HOME'a yakin "off-target" konuma, ardindan ramped HOME.
 // =============================================================================
 
@@ -41,7 +40,7 @@ static const int SERVO_MAX_DEG[4] = {
     SERVO_BASE_MAX, SERVO_SHOULDER_MAX, SERVO_ELBOW_MAX, SERVO_GRIPPER_MAX
 };
 
-// Per-servo ramp adim buyuklugu. Hepsi 1° -> akici/titremesiz hareket.
+// Per-servo ramp adim buyuklugu. Hepsi 1° -> akici hareket.
 // Hiz: 1°/40ms = 25°/sn (config.h SERVO_STEP_INTERVAL_MS).
 static const int SERVO_STEP_DEG_PER[4] = {
     1,   // 0 Base
@@ -50,21 +49,20 @@ static const int SERVO_STEP_DEG_PER[4] = {
     1    // 3 Gripper
 };
 
-// Sequential HOME state machine - shoulder ONCE, sonra digerleri.
-// Bu sirayla gitmezsek shoulder yukari kalkmadan elbow/base/gripper acilir,
-// kol govdeye veya kabloya carpabilir.
+// Sequential HOME state machine - once shoulder, sonra digerleri.
+// Aksi halde shoulder kalkmadan elbow/base/gripper acilir, kol govdeye/kabloya
+// carpabilir.
 static int homeStage = -1;   // -1 = inactive, 0 = shoulder, 1 = digerleri
 
-// LEDC PWM cozunurlugu (14-bit). 50 Hz icin ESP32 APB clock'tan tam
-// bolunmuyor ama 14-bit jitter'i tolere edilebilir seviyeye iner.
+// LEDC PWM cozunurlugu (14-bit). 50 Hz APB clock'tan tam bolunmuyor ama
+// 14-bit jitter'i tolere edilebilir seviyeye iner.
 #define SERVO_PWM_BITS  14
 #define SERVO_PWM_MAX   ((1U << SERVO_PWM_BITS) - 1)
 
 // Per-servo PWM frekansi + pulse araligi.
-// DS3225 (shoulder) datasheet: 1520 µs neutral / 333 Hz refresh.
-//   Standart 50 Hz veririsek "geç refresh" sinyali servo deadband icinde
-//   düzeltme tetikler -> sürekli mikro-titreme.
-// Digerleri klasik analog/dijital 50 Hz @ 500-2500 µs (MG90S, MG996R).
+// DS3225 (shoulder) datasheet: 1520 µs neutral / 333 Hz refresh. 50 Hz verirsek
+// "gec refresh" sinyali deadband icinde duzeltme tetikleyip mikro-titreme yapar.
+// Digerleri klasik 50 Hz @ 500-2500 µs (MG90S, MG996R).
 // ledcAttach farkli frekanstaki pinleri otomatik ayri timer'a atar.
 static const int SERVO_FREQ_HZ[4] = {
     50,    // 0 Base     - MG996R
@@ -88,12 +86,11 @@ static uint32_t angleToDuty(int id, int angle) {
 }
 
 void armInit() {
-    // GPIO 12 (Gripper) STRAPPING PIN — boot anında HIGH ise flash voltajı
-    // 1.8V'a çekilir, ESP32 boot etmez. ledcAttach'tan ONCE input-pulldown
-    // ile LOW garantile. Bu yazılım yine de boot ROM aşamasında etkili degil
-    // (boot ROM pinMode bilmez), ama runtime'da hafif ek koruma. KESIN cözüm:
-    // harici 10 kΩ pull-down GPIO 12 ↔ GND. (Daha guvenli pin: GPIO 13 olur
-    // ama o sonar'a denk gelir.)
+    // ⚠ GPIO 12 (Gripper) strapping pin — boot aninda HIGH ise flash voltaji
+    // 1.8V'a cekilir, ESP32 boot etmez. ledcAttach'tan once input-pulldown ile
+    // LOW garantile. Boot ROM pinMode bilmez (bu yazilim orada etkisiz), sadece
+    // runtime ek koruma. Kesin cozum: harici 10 kΩ pull-down GPIO 12 ↔ GND.
+    // (Daha guvenli pin GPIO 13 olurdu ama o sonar'a denk geliyor.)
     pinMode(SERVO_GRIPPER_PIN, INPUT_PULLDOWN);
     delay(5);
 
@@ -104,12 +101,10 @@ void armInit() {
         }
     }
 
-    // Boot soft-start: ilk PWM curAngle'a fırlar (servo fizigi, kacinilmaz).
-    // Bu yüzden curAngle = BOOT pozu (kolun güç kesikken durdugu yer) -> ilk
-    // snap MINIMUM olur, ardindan TÜM servolar HOME'a ayarlanan hizda (25°/sn)
-    // YAVASCA rampalanir. Eskiden base/elbow/gripper dogrudan HOME'a yaziliyordu
-    // (anlik firlatma); artik hepsi BOOT'tan yumusak rampalar.
-    // BOOT degerlerini config.h'da kolun gerçek dinlenme pozuna ayarla.
+    // Boot soft-start: ilk PWM curAngle'a firlar (servo fizigi, kacinilmaz).
+    // curAngle = BOOT pozu (kolun guc kesikken durdugu yer) -> ilk snap minimum
+    // olur, ardindan tum servolar HOME hizinda (25°/sn) yavasca rampalanir.
+    // BOOT degerlerini config.h'da kolun gercek dinlenme pozuna ayarla.
     curAngle[0] = constrain(SERVO_BASE_BOOT, SERVO_BASE_MIN, SERVO_BASE_MAX);
     curAngle[1] = constrain(SERVO_SHOULDER_BOOT, SERVO_SHOULDER_MIN, SERVO_SHOULDER_MAX);
     curAngle[2] = constrain(SERVO_ELBOW_BOOT, SERVO_ELBOW_MIN, SERVO_ELBOW_MAX);
@@ -127,21 +122,21 @@ void armInit() {
     digitalWrite(MAGNET_PIN, LOW);
     magnetState = false;
 
-    // Grip mikroswitch GPIO 3 (UART RX); gpio_reset_pin UART peripheral
-    // baglantisini kopart — pinMode tek basina IO_MUX'u override etmiyordu.
+    // Grip mikroswitch GPIO 3 (UART0 RX); gpio_reset_pin UART peripheral
+    // baglantisini koparir — pinMode tek basina IO_MUX'u override etmiyor.
     gpio_reset_pin((gpio_num_t)GRIP_SENSE_PIN);
     pinMode(GRIP_SENSE_PIN, INPUT_PULLUP);
 
     camLog("Soft-start: sh=%d el=%d -> Sequential HOME baslatildi",
            curAngle[1], curAngle[2]);
 
-    // Sequential HOME — once shoulder yavaşça yukari (40°/25°/sn = 1.6 sn),
-    // sonra base/elbow/gripper paralel olarak gerçek HOME'a.
+    // Sequential HOME — once shoulder yavasca yukari, sonra base/elbow/gripper
+    // paralel gercek HOME'a.
     armGoHome();
 }
 
-// Hedef aci yaz - gercek hareket armUpdate() icinde adim adim
-// angle, ilgili servo'nun mekanik araligina kistirilir (carpisma onleme)
+// Hedef aci yaz - gercek hareket armUpdate() icinde adim adim.
+// angle servo'nun mekanik araligina kistirilir (carpisma onleme).
 void armSetAngle(int id, int angle) {
     id = constrain(id, 0, 3);
     angle = constrain(angle, SERVO_MIN_DEG[id], SERVO_MAX_DEG[id]);
@@ -149,7 +144,7 @@ void armSetAngle(int id, int angle) {
 }
 
 // Acil dur: tum servolar mevcut pozisyonda dondurulur (target = current).
-// Ramping durur, hareket bitter ama servolar power'li kalir (pozisyonu tutar).
+// Ramping durur ama servolar gucu kesmez (pozisyonu tutar).
 void armFreeze() {
     for (int i = 0; i < 4; i++) {
         targetAngle[i]  = curAngle[i];
@@ -160,11 +155,11 @@ void armFreeze() {
            curAngle[0], curAngle[1], curAngle[2], curAngle[3]);
 }
 
-// Sequential HOME — 3 asama (carpisma onleme; kol AGV USTUNDE):
-//   0) once ELBOW yukari (clearance) — alcaktayken shoulder donerse araca
+// Sequential HOME — 3 asama (carpisma onleme; kol AGV ustunde):
+//   0) once elbow yukari (clearance) — alcaktayken shoulder donerse araca
 //      sikisir, once forearm'i kaldir
-//   1) sonra SHOULDER home'a otursun
-//   2) sonra ELBOW asagi (final) + base/gripper
+//   1) sonra shoulder home'a otursun
+//   2) sonra elbow asagi (final) + base/gripper
 void armGoHome() {
     homeStage = 0;
     targetAngle[2]  = SERVO_ELBOW_CLEAR;
@@ -172,8 +167,8 @@ void armGoHome() {
     camLog("HOME baslatildi: once elbow -> %d° (clearance)", SERVO_ELBOW_CLEAR);
 }
 
-// Her loop'ta cagrilir; SERVO_STEP_INTERVAL_MS gecmisse hedefe yaklas.
-// HOME sequence aktifse: shoulder hedefe varinca digerlerini de target'a koy.
+// Her loop'ta cagrilir; SERVO_STEP_INTERVAL_MS gecmisse hedefe bir adim yaklas.
+// HOME sequence aktifse: shoulder varinca digerlerini de target'a koyar.
 void armUpdate() {
     unsigned long now = millis();
     if (now - lastServoStep < (unsigned long)servoStepIntervalMs) return;
@@ -200,7 +195,7 @@ void armUpdate() {
 
     // ---- HOME sequence ilerletme (3 asama) ----
     if (homeStage == 0 && curAngle[2] == SERVO_ELBOW_CLEAR) {
-        // elbow clearance'a ulasti -> shoulder home'a
+        // elbow clearance'a ulasti -> shoulder home
         homeStage = 1;
         targetAngle[1] = SERVO_SHOULDER_HOME;
         servoReached[1] = (curAngle[1] == targetAngle[1]);
@@ -233,8 +228,8 @@ int armGetTarget(int id) {
 }
 
 // ---- Grip sensoru state machine ----
-// Spam yerine kenarda log: kup yapisinca "TUTULDU", temas kaybinda "DUSTU".
-// Press/release ayni 50ms debounce — sadece mekanik bounce filtresi.
+// Kenarda log (spam yok): temas olunca "TUTULDU", kayipta "DUSTU".
+// Press/release ayni 50ms debounce — mekanik bounce filtresi.
 
 static bool          gripStable        = false;
 static bool          gripPendingState  = false;
@@ -293,9 +288,9 @@ bool armGetMagnetState() {
     return magnetState;
 }
 
-// Termal koruma: miknatis kup TUTMADAN MAGNET_MAX_ON_MS gecerse otomatik kapat.
-// Kup tutuldugunda (grip 'held') sayac resetlenir → tasima boyunca acik kalir.
-// loop()'tan her cagrilir; sadece millis karsilastirir, PWM/timer kullanmaz.
+// Termal koruma: miknatis kup tutmadan MAGNET_MAX_ON_MS gecerse otomatik kapat.
+// Kup tutulunca (grip 'held') sayac resetlenir → tasima boyunca acik kalir.
+// loop()'tan cagrilir; sadece millis karsilastirir, PWM/timer kullanmaz.
 void armMagnetUpdate() {
     if (!magnetState) return;
     if (armGetGripSensor()) {        // kup tutuldu → sayaci ertele, acik kal
@@ -310,7 +305,7 @@ void armMagnetUpdate() {
 }
 
 // ---- Servo hizi (ramping interval) ----
-// ms ne kadar kucukse o kadar hizli. step_deg=1 sabit oldugu icin dps = 1000/ms.
+// ms kucukse hizli. step_deg=1 sabit oldugu icin dps = 1000/ms.
 //   ms=10  -> 100°/sn (cok hizli, mekanik stres)
 //   ms=20  ->  50°/sn (hizli)
 //   ms=40  ->  25°/sn (varsayilan, akici)

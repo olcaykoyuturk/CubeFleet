@@ -2,13 +2,13 @@
 // ESP32-CAM MJPEG Yayin Sunucusu
 //
 // AGV Server'in AP'ina (AGV_SERVER, 192.168.4.1) statik IP ile baglanir.
-// MJPEG akisini PC tarafinda Python OpenCV alir, renkli kup tespiti yapar.
+// MJPEG akisini PC tarafindaki Python alir, kup tespiti yapar.
 //
 // Kullanim:
 //   1. Server (firmware/server) calisir durumda olmali
 //   2. ESP32-CAM'i flash'la (AI-Thinker board, GPIO0->GND ile programla)
-//   3. Reset; Serial Monitor'de IP onayla (192.168.4.50)
-//   4. PC tarayici/Python: http://192.168.4.50:81/stream (port 81!)
+//   3. Reset; IP'yi onayla (192.168.4.50)
+//   4. PC: http://192.168.4.50:81/stream (port 81!)
 // =============================================================================
 
 #include "types.h"
@@ -20,8 +20,8 @@ static uint8_t       flashLedBrightness = 0;   // runtime'da degistirilebilir
 // ============================================================================
 // Kamera init + frame buffer alma/iade
 // AI-Thinker ESP32-CAM + OV3660. PSRAM'de cift framebuffer (kesintisiz capture).
-// LEDC kanal/timer 0 -> sensor XCLK. Diger LEDC kullanicilari (servo arm.ino,
-// flash LED) farkli kanal/timer kullaniyor.
+// LEDC kanal/timer 0 -> sensor XCLK; diger LEDC kullanicilari (servo, flash LED)
+// farkli kanal/timer kullanir.
 // ============================================================================
 bool cameraInit() {
     camera_config_t config = {};
@@ -48,9 +48,9 @@ bool cameraInit() {
     config.frame_size   = CAM_FRAMESIZE;
     config.jpeg_quality = CAM_JPEG_QUALITY;
 
-    // PSRAM runtime fallback — PSRAM disabled durumunda DRAM modu.
-    // (DS3225 titremesi icin PSRAM disable secenegi mumkun; bu durumda
-    // CAMERA_FB_IN_PSRAM init'i fail eder. psramFound() ile karar verelim.)
+    // PSRAM runtime fallback — PSRAM yoksa DRAM tek-fb modu. (DS3225 titremesi
+    // icin PSRAM kapatilabilir; o durumda PSRAM init fail eder, psramFound()
+    // ile karar veriyoruz.)
     if (psramFound()) {
         config.fb_location = CAMERA_FB_IN_PSRAM;
         config.fb_count    = CAM_FB_COUNT;        // 2: kesintisiz capture
@@ -68,7 +68,7 @@ bool cameraInit() {
         return false;
     }
 
-    // OV3660 ozel ince ayar — varsayilan oryantasyon ters/gri olabilir
+    // OV3660 ince ayar — varsayilan oryantasyon ters/gri olabilir
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
         if (s->id.PID == OV3660_PID) {
@@ -111,15 +111,14 @@ uint8_t getFlashLedBrightness() {
 }
 
 void setup() {
-    // Serial.begin yok — GPIO 3 (UART RX) grip mikroswitch icin lazim,
-    // UART peripheral'i pini sahiplenmesin. Log akisi camLog ring buffer
-    // + /poll endpoint ile PC'ye gider.
+    // Serial.begin yok — GPIO 3 (UART0 RX) grip mikroswitch icin lazim, UART
+    // pini sahiplenmesin. Log camLog ring buffer + /poll ile PC'ye gider.
     delay(500);
 
     pinMode(BOARD_LED_PIN, OUTPUT);
     digitalWrite(BOARD_LED_PIN, HIGH);   // aktif LOW -> kapali
 
-    // Log buffer ONCE - diger init'ler camLog'u cagirabilsin
+    // Log buffer once - diger init'ler camLog'u cagirabilsin
     camLogInit();
     camLog("Boot: ESP32-CAM (%s)", CAM_ID);
 
@@ -160,16 +159,15 @@ void loop() {
     gripUpdate();          // grip sensoru debounce + edge logu
     armMagnetUpdate();     // miknatis termal timeout korumasi (kupsuz auto-off)
 
-    // FPS metrik takip — Serial yok, sadece sayac guncelle
-    // (degerler /status endpoint'inden okunabilir).
+    // FPS metrik — sadece sayac guncelle (/status endpoint'inden okunur).
     unsigned long now = millis();
     if (now - lastDebug >= DEBUG_INTERVAL) {
         framesAtLog = mjpegFrameCount();
         lastDebug   = now;
     }
 
-    // WiFi reconnect — NON-BLOCKING. delay(1000) ana loop'u bloklar,
-    // armUpdate ve mjpegServerLoop o sirada durur. 5 sn aralikla deneme.
+    // WiFi reconnect — non-blocking. delay ana loop'u (armUpdate, mjpegServerLoop)
+    // bloklar, onun yerine 5 sn aralikla deneriz.
     static bool          wifiWasUp     = true;
     static unsigned long lastReconnect = 0;
     if (WiFi.status() != WL_CONNECTED) {

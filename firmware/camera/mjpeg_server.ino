@@ -25,7 +25,7 @@
 //   Port 81 (WiFiServer + xTask core 0):
 //     GET /                       - MJPEG canli akis (multipart boundary)
 //
-// Iki port ayri olunca stream sonsuz dongusu kontrol API'sini bloklamaz.
+// Iki port ayri olunca stream dongusu kontrol API'sini bloklamaz.
 // Kamera erisimi cameraMutex ile korunur (capture + stream cakismasin).
 // =============================================================================
 

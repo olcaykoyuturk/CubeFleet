@@ -13,18 +13,17 @@
 WebSocketsClient webSocket;
 bool wsConnected     = false;
 
-// PC heartbeat tracker — PC'den gelen son mesaj zamani (any PC-originated type).
-// Server'in pong/registered cevaplari PC kaynakli degil, sayilmaz. PC her ~1.5sn
-// pcHeartbeat gonderir; arada setHop/komut da gelirse o da reset eder.
-// Timeout asilirsa AGV moving'se motor durdurur (PC oldu varsayimi).
+// PC heartbeat tracker — PC kaynaklı son mesaj zamanı. Server'in pong/registered
+// cevapları sayılmaz. PC her ~1.5sn pcHeartbeat gönderir; arada gelen setHop/komut
+// da reset eder. Timeout aşılırsa AGV moving'se motoru durdurur (PC öldü varsayımı).
 static volatile unsigned long lastPCActivityMs = 0;
 static const unsigned long PC_HEARTBEAT_TIMEOUT_MS = 3000;
 
 static unsigned long lastStatusSend = 0;
 static unsigned long lastPing       = 0;
 
-// Kalibrasyon sirasinda WS koparsa sendCalibrationData() icin pending flag —
-// WStype_CONNECTED'da yeniden gonderilir, boylece PC countdown takilmaz.
+// Kalibrasyon sırasında WS koparsa sendCalibrationData() için pending flag —
+// WStype_CONNECTED'da yeniden gönderilir, PC countdown takılmaz.
 static bool s_pendingCalibData = false;
 
 // ===== WiFi / Sunucu Ayarları =====
@@ -39,7 +38,7 @@ static const char* AGV_ID     = "AGV_1";   // Her araca benzersiz ID
 // =============================================================================
 
 static void handleServerMessage(uint8_t* payload, size_t length) {
-    // applyCalibration mesajinda 16 int dizi var, doc daha buyuk olmali
+    // applyCalibration mesajında 16 int'lik dizi var, doc büyük olmalı
     StaticJsonDocument<768> doc;
     if (deserializeJson(doc, payload, length)) {
         return;
@@ -92,6 +91,8 @@ static void handleServerMessage(uint8_t* payload, size_t length) {
         if      (strcmp(cmd, "start")     == 0) navCommandStart();
         else if (strcmp(cmd, "stop")      == 0) navCommandStop();
         else if (strcmp(cmd, "calibrate") == 0) navCommandCalibrate();
+        else if (strcmp(cmd, "boostTurn") == 0) navCommandBoostTurn();
+        else if (strcmp(cmd, "carryOff")  == 0) navCommandCarryOff();
         return;
     }
 
@@ -112,9 +113,9 @@ static void handleServerMessage(uint8_t* payload, size_t length) {
         return;
     }
 
-    // --- Multi-AGV Planner: setHop (3-hop look-ahead emir) ---
-    // payload: {type:"setHop", agvId, from, next, after?, after2?, goal?}
-    // goal: mission nihai hedefi (REACHED check'i icin); after/after2 lokal devam.
+    // --- Planner: setHop (look-ahead emir) ---
+    // payload: {type:"setHop", agvId, from, next, after?, goal?}
+    // goal: mission nihai hedefi (REACHED kontrolü için); after lokal devam için.
     if (strcmp(type, "setHop") == 0) {
         const char* from   = doc["from"];
         const char* next_  = doc["next"];
@@ -231,11 +232,9 @@ void webSocketLoop() {
 
     if (!wsConnected) return;
 
-    // Pending calibration data — WStype_CONNECTED'da bunu burada flush edilmiyor
-    // (callback icinde delay() motorlari blokluyordu). Bunun yerine her tick'te
-    // flag'i kontrol edip yolluyoruz. sendCalibrationData icerde basariliysa
-    // s_pendingCalibData = false yapiyor; basarisiz olursa flag aynen kaliyor
-    // ve bir sonraki tick yine denenecek.
+    // Bekleyen kalibrasyon verisi: bağlantı callback'inde göndermiyoruz (orada
+    // delay() motorları bloklardı). Her tick flag'e bakıp yolluyoruz; başarısız
+    // olursa flag kalır, sonraki tick tekrar denenir.
     if (s_pendingCalibData && calibData.isCalibrated) {
         sendCalibrationData();
     }
@@ -362,10 +361,8 @@ void sendFaceComplete(char node, const char* heading) {
     webSocket.sendTXT(msg);
 }
 
-// Kritik WS gonderimi sonrasi flush — TX buffer'in TCP'ye aktarilmasi icin
-// webSocketLoop'a vakit ver. Hizli ardisik sendTXT'lerde mesaj kaybini onler.
-// Burst send sirasinda kullanilir (kalibrasyon sonu, sendCalibrationData gibi).
-// NOT: default deger (=3) types.h prototipinde — C++ tek yerde olabilir.
+// Önemli WS gönderiminden sonra flush — TX buffer TCP'ye aksın diye webSocketLoop'a
+// vakit ver. Hızlı ardışık göndermelerde mesaj kaybını önler (örn. kalibrasyon sonu).
 void wsFlush(int yields) {
     for (int i = 0; i < yields; i++) {
         webSocket.loop();

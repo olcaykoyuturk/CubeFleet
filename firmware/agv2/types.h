@@ -126,6 +126,8 @@ void navCommandStop();
 void navCommandSetPID(float kp, float ki, float kd);
 void navCommandSetSpeed(int speed);
 void navCommandCalibrate();
+void navCommandBoostTurn();
+void navCommandCarryOff();
 bool navCommandApplyCalibration(const int* minVals, const int* maxVals);
 // Multi-AGV planner: 3-hop look-ahead emir + mission goal (REACHED check).
 // after2 navPath buffer'i derinlestirir → WS gecikmesinde AGV beklemez.

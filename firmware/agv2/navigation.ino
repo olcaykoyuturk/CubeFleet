@@ -69,6 +69,16 @@ static bool hasNeighborAt(char wp, Heading dir) {
 // Sensör tabanlı dönüş yardımcıları
 // =============================================================================
 
+// Dönüş hızı (executeSpinTurn her dönüş başında ayarlar):
+//  - yük alındığı node'daki ilk dönüş → boost (50/40), tek seferlik
+//  - yük taşırken sonraki dönüşler → carry (35/30)
+//  - yük yokken → normal (TURN_SPEED / TURN_SPEED_SLOW)
+// PC: yük alınca "boostTurn", bırakınca "carryOff" gönderir.
+static int  turnSpeedNow     = TURN_SPEED;
+static int  turnSpeedSlowNow = TURN_SPEED_SLOW;
+static bool boostNextTurn    = false;
+static bool carryingLoad     = false;
+
 static bool sensorExitLine(bool turnRight) {
     unsigned long noLineStart = 0;
     bool counting = false;
@@ -78,7 +88,7 @@ static bool sensorExitLine(bool turnRight) {
         webSocketLoop();
         if (navState == NAV_IDLE) return false;
 
-        turnRight ? motorTurnRight(TURN_SPEED) : motorTurnLeft(TURN_SPEED);
+        turnRight ? motorTurnRight(turnSpeedNow) : motorTurnLeft(turnSpeedNow);
         readCalibratedSensors();
 
         bool onLine = sensorCalibrated[MID_LEFT_SENSOR]  > LINE_THRESHOLD ||
@@ -113,7 +123,7 @@ static bool sensorFindLine(bool turnRight) {
         }
 
         // Çizgi sezilince anında yavaş hıza in (atalete yetişmek için).
-        int curSpeed = anyLine ? TURN_SPEED_SLOW : TURN_SPEED;
+        int curSpeed = anyLine ? turnSpeedSlowNow : turnSpeedNow;
         turnRight ? motorTurnRight(curSpeed) : motorTurnLeft(curSpeed);
 
         bool onLine = sensorCalibrated[MID_LEFT_SENSOR]  > LINE_THRESHOLD ||
@@ -169,6 +179,19 @@ static void centerOnLine() {
 static bool executeSpinTurn(bool turnRight, int segments, int headingDelta,
                             const char* tag) {
     motorStop(); webSocketLoop(); delay(50);
+
+    // Bu dönüşün hızı: ilk dönüş en güçlü, taşırken orta, yük yoksa normal.
+    if (boostNextTurn) {
+        turnSpeedNow     = BOOST_TURN_SPEED;
+        turnSpeedSlowNow = BOOST_TURN_SPEED_SLOW;
+        boostNextTurn    = false;   // tek seferlik (sonraki dönüşler carry)
+    } else if (carryingLoad) {
+        turnSpeedNow     = CARRY_TURN_SPEED;
+        turnSpeedSlowNow = CARRY_TURN_SPEED_SLOW;
+    } else {
+        turnSpeedNow     = TURN_SPEED;
+        turnSpeedSlowNow = TURN_SPEED_SLOW;
+    }
 
     for (int s = 0; s < segments; s++) {
         if (!sensorExitLine(turnRight)) {
@@ -442,8 +465,13 @@ static void handleJunction() {
 
 // runNavigation öncesi ortak kontroller. AGV durdurulması gerekiyorsa false.
 static bool preNavigationChecks() {
-    // Engel SADECE NAV_FOLLOWING'de aktif (dönüşlerde çevre objelerini yok say)
-    if (navState == NAV_FOLLOWING && isObstacleDetected()) {
+    // Engele sadece çizgi takip ederken bakılır (dönüşte çevreyi yok say).
+    // Son hop'ta, yani sıradaki node hedefse, engele bakmıyoruz: AGV zaten o
+    // node'da duracak, biraz ötesindeki küp yolu kapatmaz. Ara hop'larda açık.
+    bool finalHop = (targetWaypoint != 0
+                     && navPathLength > navPathIndex
+                     && navPath[navPathIndex] == targetWaypoint);
+    if (navState == NAV_FOLLOWING && !finalHop && isObstacleDetected()) {
         motorStop();
         if (!nav.obstacleLogged) {
             sendLog("Engel algilandi! Bekleniyor...");
@@ -635,6 +663,18 @@ void navCommandSetSpeed(int speed) {
     baseSpeed = speed;
     char buf[24]; sprintf(buf, "Hiz: %d", speed);
     sendLog(buf);
+}
+
+// Yük alındı: ilk dönüş güçlü (boost) + taşıma modu açık (sonraki dönüşler carry).
+void navCommandBoostTurn() {
+    boostNextTurn = true;
+    carryingLoad  = true;
+}
+
+// Yük bırakıldı: taşıma modu kapanır, dönüşler normale döner.
+void navCommandCarryOff() {
+    boostNextTurn = false;
+    carryingLoad  = false;
 }
 
 void navCommandCalibrate() {

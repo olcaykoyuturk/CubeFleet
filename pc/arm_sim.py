@@ -1,24 +1,9 @@
 """
-Robot Kol — GÜVENLİ SINIR SİHİRBAZI (adım adım + canlı log).
+Robot kol — güvenli sınır (zarf) sihirbazı, adım adım.
 
-Zarf modeli (pickup_controller ile ayni):
-  * Sabit SHOULDER'da ELBOW'un guvenli bolgesi bir ARALIK -> el_min/el_max = f(sh).
-    Sinir shoulder'a gore DEGISIR — bu yuzden her durakta ayri olculur.
-  * GRIPPER'in araligi (SHOULDER, ELBOW) CIFTINE bagli -> gr_rows = f(sh, el).
-
-AKIS — her adimda tek is, yonerge kutusu soyler, her olay log paneline duser:
-  FAZ 1 (13 durak): sihirbaz shoulder'i duraga OTOMATIK goturur (Canli acikken;
-    ilk durakta ve ⛔ sonrasi sen getirirsin). Sen yalniz ELBOW'u ayarlarsin:
-    en dusuk guvenli aci -> ✓ ALT, en yuksek -> ✓ UST. Ikisi de basilinca
-    otomatik sonraki durak. Guvensiz shoulder -> ⛔ Atla.
-  FAZ 2 (gripper duraklari): kol her duragin (shoulder, elbow)'una otomatik
-    gider (Faz 1 zarfi icinden kopruleyerek). Sen yalniz GRIPPER'i ayarlarsin:
-    ✓ ALT / ✓ UST. Guvensiz kombinasyon -> ⛔ Atla.
-  Bitince 💾 KAYDET -> pickup_config.json (kalici).
-
-Kayit: autonomous.safe_envelope (type="limits").
-
-Calistir:  & ".venv\\Scripts\\python.exe" pc\\arm_sim.py
+Faz 1: her shoulder durağında elbow'un alt/üst güvenli açısını işaretle. Faz 2:
+her (shoulder, elbow) için gripper'ın alt/üstünü işaretle. Bitince → pickup_config.json
+(safe_envelope). Zarf modeli pickup_controller ile aynı.
 """
 
 from __future__ import annotations
@@ -35,8 +20,7 @@ import customtkinter as ctk
 from agv_config import pickup_config_path, default_cam_ip
 from pickup_controller import gr_band, interp_band
 
-# Kalibrasyon DOSYASI + kamera HEDEF AGV'ye gore secilir (self.target_agv) —
-# her kol fiziksel olarak farkli, pickup_config_<AGV_ID>.json ayri tutulur.
+# Kalibrasyon dosyası + kamera hedef AGV'ye göre (her kol farklı, ayrı dosya).
 TARGET_AGVS = ("AGV_1", "AGV_2")
 
 SH_STEP = 15      # FAZ 1 shoulder duraklari (0..180)
@@ -63,8 +47,7 @@ class ArmRecord(ctk.CTk):
         self.geometry("1060x680")
         ctk.set_appearance_mode("dark")
 
-        # Hedef AGV — kalibrasyon dosyasini + kamera IP'sini belirler. AGV_2
-        # zarfini olcerken AGV_1'inki ezilmesin diye ayri dosya.
+        # Hedef AGV — kalibrasyon dosyası + kamera IP'sini belirler.
         self.target_agv = "AGV_1"
         self.cam_url = f"http://{default_cam_ip(self.target_agv)}"
         self.live = False
@@ -350,8 +333,7 @@ class ArmRecord(ctk.CTk):
         self.gr_rows = []
         self.stops2 = []
         self.phase, self.step = 1, 0
-        # Ilk duraga kullanici kendisi gider (asagidaki log); sonraki duraklara
-        # gecis otomatiktir (olculen bandin ortasi uzerinden kopru).
+        # İlk durağa kullanıcı gider, sonrakilere otomatik geçilir.
         self._manual_next = False
         self._log(f"▶ Sihirbaz başladı. FAZ 1 — Durak 1/{len(self.sh_grid)}: "
                   f"shoulder={self.sh_grid[0]}°. Kolu bu durağa KENDİN getir "

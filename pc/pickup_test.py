@@ -1,36 +1,10 @@
 """
-OTONOM KAPMA TEST ARACI — bagimsiz teshis UI'si.
+Otonom kapma test aracı — bağımsız teşhis UI'si (ESP32-CAM'e doğrudan bağlanır,
+WS server gerekmez). Kapma sekansını adım adım izleyip sorunu bulmak için.
 
-agv_control.py'den BAGIMSIZ calisir: ESP32-CAM'e dogrudan baglanir
-(WS server gerekmez). Amac: kapma sekansini adim adim izleyip sorunu bulmak.
-
-Iceren:
-  * Canli MJPEG + YOLO overlay + KINEMATIK dogrulama katmani:
-      - macenta arti = MIKNATISIN YERE IZDUSUMU (FK'den hesaplanir — kol
-        inerse miknatis oraya iner; arti kupun ustundeyse model dogru)
-      - kupun HESAPLANAN dunya konumu (cm) sol ustte (cetvelle kontrol edilebilir)
-  * 4 servo slider (kolu konumlamak icin — kontrolorun baslangic pozu buradan)
-  * ▶ BASLAT / ⏹ DURDUR / 🛑 ACIL DUR (Esc) — acil dur: freeze + miknatis OFF
-  * ⏯ ADIM MODU + detayli log; her kosu pc/pickup_logs/run_*.jsonl'a TAM kayit
-  * KINEMATIK kalibrasyon paneli (olculer + 4 referans + odak)
-
-Kontrolor: pickup_controller.PickupController v4 (GERCEK KINEMATIK):
-  AIM (kup dunya konumu olculur, IK ile hover pozu hesaplanir, dogrulanir) ->
-  DESCEND (tip_z cm cm dusurulur, IK her adimda; miknatis 2 cm'de ACIK;
-  buton sonlandirir) -> GRABBED.
-
-KALIBRASYON SIRASI (bir kez, ~5 dk):
-  1) arm_sim sinir sihirbazi (guvenli zarf)
-  2) OLCULER (cetvel, cm): L1 omuz->dirsek, L2 dirsek->bilek, L3 bilek->miknatis
-     ucu, H0 omuz yerden, R0 omuz-base yatay ofset, kup kenari -> 💾 Olculeri kaydet
-  3) REFERANSLAR (kolu tarif edilen duruma getir, butona bas):
-     📐 L1 DIK (omuz uzvu dik yukari) / 📐 KOL DUZ (L2, L1 dogrultusunda) /
-     📐 MIKNATIS ASAGI (miknatis yuzu tam asagi) / 📐 BASE ILERI (tam karsi)
-  4) ODAK: kupu kameradan olculen mesafeye koy (orn. 20 cm), 🎯 Odak kalibre
-  5) DOGRULAMA: macenta arti gercekten miknatisin altindaki noktada mi; kup
-     koyunca yazilan (x, y) cm cetvelle tutuyor mu. 💾 Config Kaydet.
-
-Calistir:  & ".venv\\Scripts\\python.exe" pc\\pickup_test.py
+Canlı MJPEG + YOLO overlay + kinematik doğrulama (macenta artı = mıknatısın yere
+izdüşümü), 4 servo slider, başlat/durdur/acil dur, kinematik kalibrasyon paneli.
+Kontrolör v4 (AIM → DESCEND → GRABBED). Koşu logu: pc/pickup_logs/run_*.jsonl.
 """
 
 from __future__ import annotations
@@ -56,8 +30,7 @@ from stream_reader import StreamReader
 DATASET_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            "dataset2")   # repo koku / dataset2
 AGV = "TEST"   # tek kol — RAM ic anahtari (arm_servo_vars/detection_state/...)
-# Kalibrasyon DOSYASI + kamera HEDEF AGV'ye gore (self.target_agv) secilir —
-# her kol fiziksel olarak farkli, pickup_config_<AGV_ID>.json ayri tutulur.
+# Kalibrasyon dosyası + kamera hedef AGV'ye göre (her kol farklı, ayrı dosya).
 TARGET_AGVS = ("AGV_1", "AGV_2")
 
 SERVO_NAMES = ("Base", "Shoulder", "Elbow", "Gripper")
@@ -71,8 +44,7 @@ class PickupTest(ctk.CTk):
         self.geometry("1280x760")
         ctk.set_appearance_mode("dark")
 
-        # Hedef AGV — kalibrasyon DOSYASINI + kamera IP'sini belirler. AGV_2
-        # icin kalibrasyon yaparken AGV_1'inki ezilmesin diye ayri dosya.
+        # Hedef AGV — kalibrasyon dosyası + kamera IP'sini belirler.
         self.target_agv = "AGV_1"
 
         # --- PickupController'in bekledigi app arayuzu ---
@@ -129,8 +101,7 @@ class PickupTest(ctk.CTk):
             return {}
 
     def _save_cfg(self):
-        # ATOMIK yazim (tmp + os.replace): agv_control da ayni dosyaya yazar;
-        # yarida kesilen json.dump dosyayi bozuyordu.
+        # Atomik yazım (tmp + os.replace): yarıda kesilirse dosya bozulmasın.
         path = self._cfg_path()
         try:
             tmp = path + ".tmp"
@@ -297,9 +268,7 @@ class PickupTest(ctk.CTk):
                       command=self._single_tick).pack(side="left", expand=True,
                                                       fill="x", padx=2)
 
-        # MIKNATIS MERKEZ INCE AYAR: koşu sonrası mıknatıs küpün ortasına tam
-        # inmiyorsa, indiği YÖNE bas (mıknatısı oraya kaydırır), buton küpün
-        # tam üstüne gelene kadar 0.3'er nudge'la. Çalışan kontrolöre de uygulanır.
+        # Mıknatıs merkez ince ayar: indiği yöne bas, buton küpün üstüne gelene kadar nudge.
         ctk.CTkLabel(left, text="🎯 MIKNATIS MERKEZ AYARI (mm)",
                      font=("", 12, "bold")).pack(anchor="w", pady=(8, 0))
         self.trim_lbl = ctk.CTkLabel(left, text="", font=("", 11),
@@ -321,8 +290,7 @@ class PickupTest(ctk.CTk):
                       ).pack(side="left", expand=True, fill="x", padx=1)
         ctk.CTkButton(left, text="↺ sıfırla", width=70, fg_color="#555",
                       command=self._trim_reset).pack(anchor="w", pady=1)
-        # GRIP ACI: miknatis egik oturup kupun gerisine dusuyorsa bilek acisini
-        # ayarla (1° adim). "yukarı" = miknatis ucu kalkar (efektif aci artar).
+        # Grip açı: mıknatıs eğik oturuyorsa bilek açısını ayarla (1° adım).
         grow = ctk.CTkFrame(left, fg_color="transparent")
         grow.pack(fill="x", pady=1)
         ctk.CTkLabel(grow, text="grip açı", width=56).pack(side="left")
@@ -522,9 +490,7 @@ class PickupTest(ctk.CTk):
 
     def _pickup_ui_refresh(self, _agv: str = ""):
         c = self.pc
-        # Kosu bitince slider'lari KOLUN GERCEK pozuna esitle (HTTP yok) —
-        # kontrolor servolari dogrudan surdugu icin slider'lar bayat kaliyordu
-        # ve bir sonraki start yanlis pozdan sayiyordu (saha 09:45).
+        # Koşu bitince slider'ları kolun gerçek pozuna eşitle (yoksa bayat kalıyor).
         active = c is not None and c.active
         if getattr(self, "_was_active", False) and not active:
             self._sync_sliders_quiet()

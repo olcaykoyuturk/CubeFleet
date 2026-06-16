@@ -1,30 +1,9 @@
 """
-Kup Deposu (cube_store) — 4 fiziksel kupun saha konumu.
+Küp deposu — 4 küpün saha konumu (node + side + carrier).
 
-Kullanim akisi (kullanici karari):
-  - 4 kup, baslangicta yeri NULL. Kullanici harita UI'sinden node + yon (side)
-    isaretleyerek yerlestirir ("ilk basta ben koyuyorum").
-  - Tasima sirasinda SISTEM gunceller ("isler sende sonra"): AGV kupu kapinca
-    carrier=AGV_ID + node/side=None; birakinca node/side=birakilan yer +
-    carrier=None.
-
-Side semantigi: kup, node'un cizgisiz kenarina 90° acida konur. Gecerli yonler
-= node'un kenari OLMAYAN yonleri (free_sides). Or. F'nin N/S komsusu var (C/I)
-ama E/W bos → kup yalniz E veya W'ye konabilir; AGV faceDir ile o yone doner.
-
-Koordinat konvansiyonu (waypoints.json + firmware waypoint_map.h ile ayni):
-  KUZEY = -y (A,B,C tarafi)   GUNEY = +y (G,H,I tarafi)
-  DOGU  = +x (C,F,I tarafi)   BATI  = -x (A,D,G tarafi)
-
-Format (pc/cubes.json — runtime'da olusur, gitignore):
-
-    {
-      "cubes": {
-        "1": {"node": "F", "side": "E", "carrier": null},
-        "2": {"node": null, "side": null, "carrier": "AGV_1"},
-        ...
-      }
-    }
+Kullanıcı node + çizgisiz kenar (side) işaretleyip yerleştirir; taşıma sırasında
+sistem günceller. side = node'un komşusu olmayan yön (free_sides). Yön: KUZEY=-y,
+GUNEY=+y, DOGU=+x, BATI=-x (firmware waypoint_map ile aynı). Format: pc/cubes.json.
 """
 
 from __future__ import annotations

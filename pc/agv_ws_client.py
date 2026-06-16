@@ -1,32 +1,5 @@
 """
-AGV WebSocket Client
-====================
-ESP32 AGV server'a baglanir, AGV durumlarini ve loglari ayri thread'te dinler.
-UI thread'inden surekli `pop_events()` ile yeni olaylari al ve uygula.
-
-Server protokolu (firmware/server/server.ino):
-    PC -> Server:
-        {type: "setPosition",      agvId: "AGV_1", waypoint: "A"}
-        {type: "setHop",           agvId: "AGV_1", from: "A", next: "B",
-                                   after: "E", goal: "I"}    # 2-hop emir
-        {type: "clearMission",     agvId: "AGV_1"}
-        {type: "setPID",           agvId: "AGV_1", Kp: 0.012, Ki: 0, Kd: 0.005}
-        {type: "setSpeed",         agvId: "AGV_1", speed: 35}
-        {type: "command",          agvId: "AGV_1", command: "start|stop|calibrate"}
-        {type: "applyCalibration", agvId: "AGV_1", sensorMin: [...8], sensorMax: [...8]}
-        {type: "faceDir",          agvId: "AGV_1", dir: "N|E|S|W"}  # kup yonune don
-        {type: "pcHeartbeat"}      # her 1.5sn (firmware AGV disconnect tespiti)
-        {type: "getList"}
-
-    Server -> PC:
-        {type: "agvList",   agvs: [{...}, ...]}
-        {type: "agvUpdate", id, connected, currentWaypoint, targetWaypoint,
-                            path, pathIdx, heading, navState, linePos,
-                            Kp, Ki, Kd, baseSpeed, calibrated, isTarget,
-                            sonarDist, obstacle, sensors[8]}
-        {type: "log",             agvId, message, time}
-        {type: "calibrationData", agvId, sensorMin: [...8], sensorMax: [...8]}
-        {type: "faceComplete",    agvId, node, heading, time}  # faceDir bitti
+AGV WebSocket istemcisi
 """
 
 import json
@@ -111,7 +84,7 @@ class CalibrationDataEvent:
 @dataclass
 class HopCompleteEvent:
     """AGV bir hop'u tamamladi, yeni node'a vardi. Planner bunu alip
-    on_hop_complete cagirir → rezervasyon guncellenir."""
+    on_hop_complete cagirir (rezervasyon guncellenir)."""
     agvId:     str
     node:      str
     heading:   str   = ""
@@ -122,7 +95,7 @@ class HopCompleteEvent:
 @dataclass
 class FaceCompleteEvent:
     """AGV faceDir donusunu bitirdi (kup yonune bakti). UI bunu alip otonom
-    kapma akisini baslatabilir. heading firmware string'i (KUZEY/DOGU/...)."""
+    kapma akisini baslatabilir. heading = firmware string'i (KUZEY/DOGU/...)."""
     agvId:     str
     node:      str
     heading:   str   = ""
@@ -144,9 +117,7 @@ class AGVClient:
     UI bunu surekli pop'lar.
     """
 
-    # PC -> AGV heartbeat periyodu (saniye). AGV firmware'i 3sn timeout
-    # uyguluyor — 1.5sn periyot guvenli marjin saglar (1 paket kaybolsa bile
-    # ikincisi yakalanir).
+    # PC→AGV heartbeat periyodu (sn). Firmware 3sn timeout; 1.5sn marjin.
     HEARTBEAT_INTERVAL_S = 1.5
 
     def __init__(self, url: str):
@@ -158,11 +129,9 @@ class AGVClient:
         self.connected = False
         self.agvs: Dict[str, AGVState] = {}
         self._stop_flag = threading.Event()
-        # send_raw UI thread'inden, websocket-client'in kendi ping thread'i ile
-        # ayni socket'e yazma yarisina girebilir. Lock ile serialize et.
+        # send'ler (UI + ping thread) aynı socket'e yazabilir; lock ile serialize.
         self._send_lock = threading.Lock()
-        # debug_timing=True iken her WS mesaji "ws_debug" event olarak kuyruga
-        # girer; UI log paneline yansir. Kapaliyken sifir overhead.
+        # debug_timing açıkken her mesaj ws_debug event olur (kapalıyken sıfır maliyet).
         self.debug_timing = False
 
     # -------------------------------------------------------------------------
@@ -172,7 +141,7 @@ class AGVClient:
         self._stop_flag.clear()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
-        # PC heartbeat sender — firmware'in 3sn timeout'undan dususuk periyot.
+        # PC heartbeat sender — firmware'in 3sn timeout'undan dusuk periyot.
         self.heartbeat_thread = threading.Thread(
             target=self._heartbeat_loop, daemon=True,
         )
@@ -191,14 +160,14 @@ class AGVClient:
             self.heartbeat_thread.join(timeout=1.0)
 
     def _heartbeat_loop(self):
-        """PC -> AGV heartbeat. Server forward eder, AGV firmware'i alip
-        lastPCActivityMs guncel tutar. Sn 1.5'lik periyot 3sn timeout'a marjin.
-        Disconnect sirasinda send_raw zaten False doner — sessizce devam."""
+        """PC -> AGV heartbeat. Server forward eder, firmware alip
+        lastPCActivityMs guncel tutar. 1.5sn periyot 3sn timeout'a marjin.
+        Disconnect sirasinda send_raw False doner — sessizce devam."""
         while not self._stop_flag.is_set():
             if self.connected:
-                # Tip kontrolu firmware'de yapilir; tek field yeterli.
+                # Tip kontrolu firmware'de; tek field yeterli.
                 self.send_raw({"type": "pcHeartbeat"})
-            # _stop_flag.wait sleep'ten daha duyarli — disconnect anında break.
+            # _stop_flag.wait sleep'ten daha duyarli — disconnect aninda break.
             if self._stop_flag.wait(self.HEARTBEAT_INTERVAL_S):
                 break
 
@@ -212,11 +181,7 @@ class AGVClient:
                     on_error   = self._on_error,
                     on_close   = self._on_close,
                 )
-                # run_forever blokludur, ws.close() ile cikar.
-                # ping_interval=30, ping_timeout=15 → WiFi flicker'a tolerans.
-                # Eski 10/5 ESP32 server'in burst broadcast (2 AGV × 2Hz status)
-                # sirasinda PC ping'ine yetisemediginde false-positive disconnect
-                # yapiyordu. Gercek disconnect yine 45sn icinde tespit edilir.
+                # run_forever bloklu, ws.close() ile çıkar. ping 30/15: WiFi toleransı.
                 self.ws.run_forever(ping_interval=30, ping_timeout=15)
             except Exception as e:
                 self.events.put(("error", f"WS run hata: {e}"))
@@ -224,8 +189,7 @@ class AGVClient:
             if self._stop_flag.is_set():
                 break
 
-            # Yeniden baglan dene — stop sinyalini dinleyerek bekle (sleep
-            # yerine wait: kapanista 2 sn'ye kadar takilma olmasin)
+            # Yeniden bağlan — stop sinyalini dinleyerek bekle (takılmasın).
             self.events.put(("error", "Yeniden baglaniliyor..."))
             if self._stop_flag.wait(2.0):
                 break
@@ -241,9 +205,7 @@ class AGVClient:
         self.send_raw({"type": "getList"})
 
     def _on_close(self, ws, code, reason):
-        # Drop diagnostics: connection lifetime + close code + reason yardimcidir.
-        # code/reason library tarafindan TCP/WS protocol seviyesinden gelir;
-        # None ise abrupt TCP RST (genelde WiFi flicker veya server crash).
+        # Drop teşhisi: lifetime + close code/reason. None = ani TCP RST (WiFi/crash).
         lifetime = (time.time() - getattr(self, "_connect_time", time.time()))
         reason_s = reason if reason else "—"
         code_s   = str(code) if code is not None else "—"
@@ -265,8 +227,7 @@ class AGVClient:
 
         t = doc.get("type", "")
 
-        # DEBUG: Her gelen mesaj icin timing logu. Status broadcast (agvUpdate)
-        # cok sik geldigi icin sadece "ilgilenilen" tipleri logla — yoksa spam.
+        # Sadece ilgilendiğimiz tipleri logla (agvUpdate çok sık, spam olmasın).
         if self.debug_timing and t in ("hopComplete", "log", "calibrationData",
                                        "agvList"):
             t_fw = int(doc.get("time", 0))
@@ -343,20 +304,18 @@ class AGVClient:
     def send_raw(self, payload: dict) -> bool:
         if not self.connected or self.ws is None:
             return False
-        # websocket-client'in run_forever() icindeki ping thread'i ile UI
-        # thread'inden gelen send cagrilari ayni TCP socket'a yaziyor olabilir;
-        # WS frame corruption olmasin diye serialize et.
+        # Ping + UI send'leri aynı socket'e yazabilir; frame bozulmasın diye lock.
         t0 = time.time() if self.debug_timing else 0.0
         with self._send_lock:
             try:
                 blob = json.dumps(payload)
                 self.ws.send(blob)
-                # DEBUG: pcHeartbeat'i loglama — 1.5sn'de bir gelir, gurultu.
+                # pcHeartbeat'i loglama — 1.5sn'de bir gelir, gurultu.
                 if self.debug_timing and payload.get("type") != "pcHeartbeat":
                     dt = (time.time() - t0) * 1000
                     ptype = payload.get("type", "?")
                     aid   = payload.get("agvId", "")
-                    # setHop icin detayli, digerleri sadece tip+agv
+                    # setHop detayli, digerleri sadece tip+agv
                     extras = ""
                     if ptype == "setHop":
                         extras = (f" {payload.get('from','?')}>{payload.get('next','?')}"
@@ -375,7 +334,7 @@ class AGVClient:
     # Komut yardimcilari
     def set_position(self, agv_id: str, waypoint: str) -> bool:
         return self.send_raw({"type": "setPosition", "agvId": agv_id, "waypoint": waypoint})
-    # (set_target kaldirildi — path planning PC planner'da, set_hop kullanilir.)
+    # (set_target kaldirildi — path planning PC'de, set_hop kullanilir.)
 
     def set_pid(self, agv_id: str, kp: float, ki: float, kd: float) -> bool:
         return self.send_raw({
@@ -405,14 +364,14 @@ class AGVClient:
                 after:  Optional[str] = None,
                 after2: Optional[str] = None,
                 goal:   Optional[str] = None) -> bool:
-        """3-hop look-ahead emir. AGV `from_`'dan `next_`'e gider, kavsakta
-        `after`/`after2` icin yon belirler ve durmaz. `after`/`after2` None ise
-        navPath o kadar uzun olmaz (path sonu). 3. hop (`after2`), WS gecikmesi
-        olsa bile AGV'nin path-sonu node'unda beklemeden devam etmesini saglar.
+        """3-hop look-ahead emir. AGV from_'dan next_'e gider, kavsakta
+        after/after2 icin yon belirler ve durmaz. after/after2 None ise navPath
+        o kadar uzun olmaz (path sonu). 3. hop (after2) WS gecikmesinde bile
+        AGV'nin path-sonu node'unda beklemeden devamini saglar.
 
-        `goal`: mission'un nihai hedefi. AGV firmware "Hedefe ulasildi"
-        kontrolunde local hop after yerine bunu kullanir; AGV ara node'da
-        durmaz, sadece gercek goal'da REACHED."""
+        goal: mission'un nihai hedefi. Firmware "Hedefe ulasildi" kontrolunde
+        local hop after yerine bunu kullanir; AGV ara node'da durmaz, sadece
+        gercek goal'da REACHED."""
         payload: dict = {
             "type":  "setHop",
             "agvId": agv_id,
@@ -431,9 +390,9 @@ class AGVClient:
         return self.send_raw({"type": "clearMission", "agvId": agv_id})
 
     def face_dir(self, agv_id: str, direction: str) -> bool:
-        """Kup yonune don: direction 'N'|'E'|'S'|'W'. Yalniz NAV_IDLE'da
-        kabul edilir; donus bitince AGV faceComplete yollar. O yonde cizgi
-        varsa sensorlu donus, yoksa ogrenilen sureyle zamanli 90° donus."""
+        """Kup yonune don: direction 'N'|'E'|'S'|'W'. Yalniz NAV_IDLE'da kabul
+        edilir; donus bitince AGV faceComplete yollar. O yonde cizgi varsa
+        sensorlu donus, yoksa zamanli 90° donus."""
         d = (direction or "").strip().upper()[:1]
         if d not in ("N", "E", "S", "W"):
             return False

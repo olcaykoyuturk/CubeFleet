@@ -1,37 +1,11 @@
 """
-Otonom kup kapma — v4: GERCEK KINEMATIK (aci hesabiyla konum).
+Otonom küp kapma — v4 (gerçek kinematik, arm_kinematics.ArmModel).
 
-NEDEN v4: v1-v3 goruntu-uzayi kalibrasyonlariyla ugrasti (sabit hedef piksel,
-paralaks ornekleri, jog probe) — kullanici "aci hesabi yapip GERCEKTEN
-hesaplayan bir sey" istedi. v4 kolu fiziksel modeller (arm_kinematics.ArmModel):
+Akış: AIM (kameradan küp konumu → IK ile hover pozu) → DESCEND (adım adım iner,
+her adımda IK, magnet_on_cm'de mıknatıs açık) → GRABBED (buton). Görüş gitse de
+aynı dikey çizgide iner. Hata → ABORT.
 
-  1) Kameradan KUPUN DUNYA KONUMU (cm) hesaplanir — isin-zemin kesisimi
-     (bbox boyutuna gerek yok; piksel + kamera pozu + zemin duzlemi yeter).
-  2) Ters kinematikle "miknatis kupun TAM USTUNDE, TAM ASAGI bakar" servo
-     acilari HESAPLANIR ve kol oraya surulur (NISAN/AIM).
-  3) Inis = hedef yuksekligi cm cm dusurup IK'yi yeniden cozmek (DESCEND).
-     Gorus varsa kup konumu yumusakca guncellenir; gorus gitse de matematik
-     ayni dikey cizgide inmeye devam eder. BUTON (grip switch) sonlandirir.
-
-Durum makinesi:
-    IDLE -> AIM     : kup konumu olculur (ardisik iki tahmin uyusunca kilit),
-                      IK ile hover pozu hesaplanir, kol surulur, varista
-                      yeniden olcum -> sapma buyukse yeniden nisan
-         -> DESCEND : tip_z adim adim iner (IK her adimda yeniden cozulur,
-                      bilek hep tam asagi); magnet_on_cm'de miknatis ACIK;
-                      zemine bastirmaya kadar (floor_cm) surer
-         -> GRABBED : buton -> miknatis ACIK, dur
-         \\-> ABORT : kayip (nisan asamasinda) / erisim disi / zarf / timeout
-
-KALIBRASYON (pickup_test 'KINEMATIK' bolumu — cetvel + 4 referans + odak):
-  olculer: L1 L2 L3 H0 R0 kup boyutu (cm)
-  referanslar: L1 tam DIK, kol DUZ, miknatis TAM ASAGI, base TAM ILERI
-  odak: kup bilinen mesafede -> cam_f = bh_px * D / kup_cm
-
-GUVENLI BOLGE: arm_sim zarfi her servo komutunda korunur (_move -> _repair).
-SETTLE: /poll arm verisi (servos==targets==komut) + 1 kare; bayatsa tick sayaci.
-KOSU LOGU: pc/pickup_logs/run_*.jsonl — config, her tick (poz/tespit/dunya
-tahmini/hedef/karar), her servo komutu, IK/zarf engelleri, bitis nedeni.
+Güvenli bölge arm_sim zarfıyla korunur. Koşu logu: pc/pickup_logs/run_*.jsonl.
 """
 
 from __future__ import annotations
@@ -149,14 +123,9 @@ class PickupController:
         "floor_cm": -1.5,         # tip_z = kup_ustu + h; h buraya kadar (bastirma)
         "track_clamp_cm": 0.5,    # DESCEND'de tahmin guncelleme adimi siniri
         "grace_ticks": 8,         # zemine inildi, butonsuz bekleme
-        # INCE AYAR: miknatis ucu ile kinematik model arasindaki kucuk kayma
-        # (montaj/L3 toleransi). IK hedefi kup yonunde ileri/yana kaydirilir ->
-        # miknatis kupun TAM ortasina (buton kupe basacak) iner. pickup_test
-        # nudge butonlariyla 0.3'er ayarlanir.
+        # İnce ayar: IK hedefini küp yönünde kaydır → mıknatıs tam ortaya iner.
         "aim_trim_fwd": 0.0, "aim_trim_lat": 0.0,
-        # GRIP ACI INCE AYAR: IK miknatisi -90° (tam asagi) hedefler; grip
-        # kalibrasyonu 1-2° kayuksa miknatis egik oturup kupun gerisine duser.
-        # grab_gamma_off ile efektif aci -90+off; pickup_test ±1° nudge.
+        # Grip açı ince ayar: -90° hedef; kalibrasyon kayıksa grab_gamma_off ile düzelt.
         "grab_gamma_off": 0.0,
         # --- hareket/olcum ---
         "max_step_deg": 2, "pickup_speed_ms": 40,
@@ -734,9 +703,7 @@ class PickupController:
                         self._abort("Hover pozuna zarf izin vermiyor — küp zarf "
                                     "içinde erişilebilir bölgede değil.")
                     return
-                # varildi -> dogrulama olcumu. Kup GORUNMUYORSA iptal ETME:
-                # hover'da kamera ofseti yuzunden kup kadraj disi kalabilir;
-                # v4'un amaci gorus olmadan da inmek -> kinematik tahmine guven.
+                # Varış doğrulaması. Küp görünmüyorsa iptal etme — görüşsüz de iner.
                 est = self._estimate()
                 if est == "WAIT":
                     self._decision = "kare birikiyor (doğrulama)"
@@ -858,8 +825,7 @@ class PickupController:
             gamma = -90.0 + float(self._cfg.get("grab_gamma_off", 0) or 0)
             tgt = self.model.ik(x, y, cube_cm + next_h, current=self.cmd,
                                 tip_gamma=gamma)
-            # Daha alcak hedef IK/zarf disindaysa: ABA ETME — burasi inebildigimiz
-            # EN ALT nokta; miknatis aciksa kup cekilir, butonu bekle (grace).
+            # Daha alçak IK/zarf dışıysa burası en alt nokta; butonu bekle (grace).
             if tgt is None or not self._envelope_ok(tgt):
                 if not self._magnet_on:   # son carede miknatis ac
                     self._magnet_on = True
@@ -869,8 +835,7 @@ class PickupController:
                 self._decision = (f"iniş sınırı h={self._h:.1f}cm — buton "
                                   f"bekleniyor {self._grace}/{self._cfg['grace_ticks']}")
                 if self._grace > int(self._cfg["grace_ticks"]):
-                    # IK None = kol UZANMA sinirinda (kup cok uzak) ->
-                    # YAKLASTIR; zarf blogu = katlanma sinirinda -> zarfi genislet
+                    # IK None = uzanma sınırı → yaklaştır; zarf bloğu → zarfı genişlet.
                     why = ("küp ÇOK UZAK, kol tam uzandı yetişemedi — küpü "
                            "KOLA YAKLAŞTIR (~13-16 cm)" if tgt is None else
                            "kol katlanma (zarf) sınırında — arm_sim'de alçak "

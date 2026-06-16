@@ -6,20 +6,26 @@
 // =============================================================================
 
 // ===== Navigasyon / Dönüş =====
-// Ağır araç (1 kg) statik sürtünmeyi yenmek için 22 PWM gerek
-#define TURN_SPEED                25   // Dönüş başlangıç PWM hızı (statik sürtünmeyi yenmek için)
-#define TURN_SPEED_SLOW           20   // Çizgi yaklaşınca yavaşlama hızı (hassas hizalama)
+// Dönüş 45'te başlar, çizgiye yaklaşınca 35'e iner (hassas hizalama).
+#define TURN_SPEED                45   // Dönüş başlangıç PWM hızı
+#define TURN_SPEED_SLOW           35   // Çizgi yaklaşınca yavaşlama hızı
+// Yük alındığı node'daki İLK dönüş — kalkış için en güçlü.
+#define BOOST_TURN_SPEED          50   // ilk dönüş başlangıç hızı
+#define BOOST_TURN_SPEED_SLOW     40   // ilk dönüş yavaşlama hızı
+// Yük taşırken (ilk dönüşten sonra, bırakana kadar) tüm dönüşler: 50 → 38.
+#define CARRY_TURN_SPEED          50   // taşıma dönüşü başlangıç
+#define CARRY_TURN_SPEED_SLOW     38   // taşıma dönüşü yavaşlama
 #define TURN_TIMEOUT            5000   // Maksimum dönüş süresi (ms) — ağır araç biraz uzun döner
 
 // ===== Zamanlı Dönüş (faceDir — küp yönüne, çizgisiz 90°) =====
 // Çizgi OLMAYAN yöne (küp tarafı) dönerken motor SABİT bu süre kadar döner.
-// (Öğrenilen-süre/EMA kaldırıldı — saha tercihi sabit 500 ms.)
-#define TIMED_TURN90_MS 500
+// (Öğrenilen-süre/EMA kaldırıldı — saha tercihi sabit 680 ms.)
+#define TIMED_TURN90_MS 680
 
 // ===== Debounce =====
 #define LINE_EXIT_MS   200   // Çizgiden çıkış: bu kadar ms çizgi görünmemeli
 #define LINE_FIND_MS    25   // Çizgi bulundu: bu kadar ms kesintisiz görünmeli
-                             // Düşük TURN_SPEED ile sensör çizgide kalır, false positive'i azaltır
+                             // (düşük TURN_SPEED ile sensör çizgide kalır, false positive azalır)
 
 // ===== Kavşak Tespiti =====
 #define JUNCTION_MIN_SENSORS   4   // Bu kadar veya daha fazla sensör aktifse kavşak
@@ -30,20 +36,19 @@
 #define LINE_THRESHOLD   600   // Kalibre sensör eşiği (0-1000 arası)
 
 // ===== WebSocket Zamanlaması =====
-// 500 -> 1000: multi-AGV'de status broadcast (server textAll, her AGV) setHop
-// forward'ini geciktiriyordu (AGV path-sonu node'larinda komut bekleyip
-// duruyordu). 1 sn UI/sensor icin yeterli; pozisyon zaten hopComplete'ten
-// gelir. WS kuyrugunu hafifletip setHop gecikmesini dusurur.
+// 500 -> 1000: çoklu AGV'de status broadcast setHop forward'ini geciktiriyordu
+// (AGV path sonunda komut bekliyordu). 1 sn UI/sensör için yeterli; pozisyon
+// zaten hopComplete'ten geliyor.
 #define STATUS_INTERVAL  1000   // Durum paketi gönderme aralığı (ms)
 #define PING_INTERVAL    5000   // Canlı kalma ping aralığı (ms)
 
 // ===== Varsayılan PID Değerleri =====
-#define PID_DEFAULT_KP   0.008f
+#define PID_DEFAULT_KP   0.010f
 #define PID_DEFAULT_KI   0.000f
 #define PID_DEFAULT_KD   0.003f
 
 // ===== Varsayılan Hız =====
-#define DEFAULT_BASE_SPEED   30   // Temel motor PWM hızı
+#define DEFAULT_BASE_SPEED   40   // Temel motor PWM hızı
 
 // ===== Motor Trim (Düz Gidiş Dengesi) =====
 // Araç sağa kayıyorsa: pozitif artır (+2, +4...)
@@ -57,12 +62,11 @@
 #define CALIB_MIN_RANGE           500   // Sensör başına minimum kabul edilebilir range (ham ADC)
 
 // ===== HC-SR04 Engel Tespiti =====
-// Iki seviyeli yaklasim: SLOW zone'da hiz dustur, STOP zone'da tamamen dur.
-// Boylece engele yumusak iner, ezici fren yok. Multi-AGV koridorunda da
-// yan AGV'ye yaklasinca asagi geciyoruz.
-#define OBSTACLE_STOP_CM      10    // Bu cm altinda tam dur (eski OBSTACLE_DISTANCE_CM)
-#define OBSTACLE_SLOW_CM      20    // Bu cm altinda yavasla (slow zone)
-#define OBSTACLE_SLOW_PCT     40    // Slow zone'da baseSpeed yuzdesi (40 = %40 hiz)
+// İki seviyeli: SLOW zone'da yavaşla, STOP zone'da tam dur. Engele yumuşak iner,
+// çoklu AGV koridorunda yan araca yaklaşınca hız düşer.
+#define OBSTACLE_STOP_CM      10    // Bu cm altında tam dur
+#define OBSTACLE_SLOW_CM      20    // Bu cm altında yavaşla (slow zone)
+#define OBSTACLE_SLOW_PCT     40    // Slow zone'da baseSpeed yüzdesi (40 = %40 hız)
 #define SONAR_INTERVAL       100    // Sonar olcum araligi (ms)
 
 // ===== Kavşak Davranışı =====

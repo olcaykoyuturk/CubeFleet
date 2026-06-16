@@ -1,12 +1,12 @@
 """
 Threaded MJPEG stream reader.
-Surekli arka planda en taze frame'i tutar; UI bunu okur.
+Arka planda en taze frame'i tutar; UI bunu okur.
 
-ONEMLI: cv2.VideoCapture(url) AGI uzerinden bir akisa baglanirken UI thread'inde
-cagrilirsa kamera erisilemezse SANIYELERCE bloklar (FFmpeg connect timeout) ve
-tum arayuz donar. Bu yuzden acilis + okuma TAMAMEN arka thread'de yapilir; start()
-aninda doner, kamera yoksa UI bloklanmaz, thread arka planda yeniden baglanmayi
-dener. Durum `status` ile UI'ya bildirilir.
+Onemli: cv2.VideoCapture(url) UI thread'inde cagrilir ve kamera erisilemezse
+saniyelerce bloklar (FFmpeg connect timeout) → tum arayuz donar. Bu yuzden
+acilis + okuma tamamen arka thread'de; start() aninda doner, kamera yoksa UI
+bloklanmaz, thread arka planda yeniden baglanmayi dener. Durum `status` ile
+UI'ya bildirilir.
 """
 
 import threading
@@ -31,7 +31,7 @@ class StreamReader:
         self._retry_delay_s   = retry_delay_s
 
     def start(self) -> bool:
-        """NON-BLOCKING: VideoCapture acilisi thread icinde yapilir → UI bloklanmaz.
+        """Non-blocking: VideoCapture acilisi thread icinde → UI bloklanmaz.
         Her zaman True doner (gercek baglanti durumu `status`'tan okunur)."""
         if self.running:
             return True
@@ -51,7 +51,7 @@ class StreamReader:
             ]
             cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG, params)
         except Exception:
-            # Eski OpenCV: timeout parametre formu yok — yine thread'de, UI bloklanmaz
+            # Eski OpenCV: timeout parametre formu yok — yine thread'de, UI serbest
             cap = cv2.VideoCapture(self.url)
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

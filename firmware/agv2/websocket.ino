@@ -87,6 +87,8 @@ static void handleServerMessage(uint8_t* payload, size_t length) {
         if      (strcmp(cmd, "start")     == 0) navCommandStart();
         else if (strcmp(cmd, "stop")      == 0) navCommandStop();
         else if (strcmp(cmd, "calibrate") == 0) navCommandCalibrate();
+        else if (strcmp(cmd, "boostTurn") == 0) navCommandBoostTurn();
+        else if (strcmp(cmd, "carryOff")  == 0) navCommandCarryOff();
         return;
     }
 
@@ -107,7 +109,7 @@ static void handleServerMessage(uint8_t* payload, size_t length) {
         return;
     }
 
-    // --- Multi-AGV Planner: setHop (3-hop look-ahead emir + goal) ---
+    // --- Planner: setHop (look-ahead emir + goal) ---
     if (strcmp(type, "setHop") == 0) {
         const char* from   = doc["from"];
         const char* next_  = doc["next"];
@@ -221,11 +223,9 @@ void webSocketLoop() {
 
     if (!wsConnected) return;
 
-    // Pending calibration data — WStype_CONNECTED'da bunu burada flush edilmiyor
-    // (callback icinde delay() motorlari blokluyordu). Bunun yerine her tick'te
-    // flag'i kontrol edip yolluyoruz. sendCalibrationData icerde basariliysa
-    // s_pendingCalibData = false yapiyor; basarisiz olursa flag aynen kaliyor
-    // ve bir sonraki tick yine denenecek.
+    // Bekleyen kalibrasyon verisi: bağlantı callback'inde göndermiyoruz (orada
+    // delay() motorları bloklardı). Her tick flag'e bakıp yolluyoruz; başarısız
+    // olursa flag kalır, sonraki tick tekrar denenir.
     if (s_pendingCalibData && calibData.isCalibrated) {
         sendCalibrationData();
     }
@@ -348,10 +348,8 @@ void sendFaceComplete(char node, const char* heading) {
     webSocket.sendTXT(msg);
 }
 
-// Kritik WS gonderimi sonrasi flush — TX buffer'in TCP'ye aktarilmasi icin
-// webSocketLoop'a vakit ver. Hizli ardisik sendTXT'lerde mesaj kaybini onler.
-// Burst send sirasinda kullanilir (kalibrasyon sonu, sendCalibrationData gibi).
-// NOT: default deger (=3) types.h prototipinde — C++ tek yerde olabilir.
+// Önemli WS gönderiminden sonra flush — TX buffer TCP'ye aksın diye webSocketLoop'a
+// vakit ver. Hızlı ardışık göndermelerde mesaj kaybını önler (örn. kalibrasyon sonu).
 void wsFlush(int yields) {
     for (int i = 0; i < yields; i++) {
         webSocket.loop();

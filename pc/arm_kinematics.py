@@ -1,51 +1,11 @@
 """
-Kol kinematigi — GERCEK GEOMETRI (v4'un matematik cekirdegi).
+Kol kinematiği (v4): FK (servo→mıknatıs cm), kameradan küp konumu (ışın-zemin
+kesişimi) ve IK (hedef→servo). Servo ≠ derece — her eklemin servo→açı haritası
+config'teki referans noktalarından (açı = k*servo + b) çıkarılır.
 
-Onceki yaklasimlar goruntu-uzayinda kalibrasyonla ugrasti; v4 kolu fiziksel
-modeller: uzuv uzunluklari (cetvelle olculur) + servo degerlerinden
-trigonometriyle MIKNATISIN cm konumu (ileri kinematik), kameradan KUPUN cm
-konumu (isin-zemin kesisimi) ve hedefe gitmek icin gereken servo degerleri
-(ters kinematik) HESAPLANIR.
-
-SERVO != DERECE! Servo komutu 0..180 "birim"dir; fiziksel aciya esit DEGILDIR
-(PWM bandi + mekanik aktarma -> eklem basina farkli EGIM ve OFSET). Bu yuzden
-her eklemin servo->aci haritasi IKI (veya daha cok) referans noktasindan
-DOGRU UYDURMA (linear fit) ile cikarilir:
-    aci = k * servo + b
-Referans noktasi = kullanicinin GOZLE dogrulayabilecegi fiziksel durus
-(orn. "L1 tam DIK" -> alpha=90). Iki nokta egimi de verir; tek nokta varsa
-egim *_sign * 1.0 varsayilir (kaba). Noktalar config'te listedir:
-    sh_pts/el_pts/gr_pts/base_pts = [[servo, aci], ...]
-Ayni servo degerine (±2) ikinci nokta eskisini gunceller; iki noktanin servo
-araligi < 15 birim ise fit guvenilmez sayilir (missing() raporlar).
-
-KOORDINATLAR
-  Dunya: base ekseni orijin, +y ILERI, +x SAG, +z YUKARI (cm).
-  Kol duzlemi (base yaw'i ile doner): r = ileri mesafe, z = yukseklik.
-  Omuz mafsali duzlemde S = (R0, H0).
-
-UZUVLAR (cetvelle olculur, cm)
-  L1: omuz mafsali -> dirsek mafsali
-  L2: dirsek mafsali -> bilek mafsali
-  L3: bilek mafsali -> MIKNATIS UCU (buton yuzeyi)
-  H0: omuz mafsalinin yerden yuksekligi
-  R0: omuz mafsalinin base donme eksenine yatay uzakligi
-
-ACILAR (derece; 0 = yatay-ileri, + = yukari)
-  alpha     : L1'in mutlak acisi              (sh_pts: DIK=90, YATAY=0)
-  beta_rel  : L2'nin L1'e GORE acisi          (el_pts: KOL DUZ=0,
-              L2 YATAY iken = -alpha(o anki s1))
-  gamma_rel : L3'un L2'ye GORE acisi          (gr_pts: MIKNATIS ASAGI iken
-              = -90 - beta_abs, MIKNATIS ILERI iken = -beta_abs)
-  yaw       : base donusu (0 = tam ileri, + = SAG; base_pts: ILERI=0, SAG=90)
-  Miknatis tam asagi bakar <=> gamma = beta + gamma_rel = -90.
-
-KAMERA (bilege/L3'e rijit):
-  cam_dx: L3 ekseni boyunca bilekten ileri ofset (cm)
-  cam_dz: L3 eksenine dik, "link yukarisi" ofset (cm)
-  cam_pitch: optik eksenin L3 eksenine gore acisi (derece, + yukari)
-  cam_f: odak (piksel) — OV3660 HVGA icin ~370; tek olcumle kalibre edilir
-  Goruntu: u saga, v asagi artar; merkez (cam_cx, cam_cy).
+Uzuvlar L1/L2/L3 (omuz→dirsek→bilek→mıknatıs), açılar alpha/beta/gamma/yaw.
+Koordinat: +y ileri, +x sağ, +z yukarı (cm). Mıknatıs tam aşağı ⇔ gamma=-90.
+Kamera bileğe rijit (cam_dx/dz/pitch/f).
 """
 
 from __future__ import annotations
@@ -61,13 +21,9 @@ DEFAULTS = {
     "L1": 10.0, "L2": 10.0, "L3": 6.0, "H0": 7.0, "R0": 2.0,
     # servo->aci referans noktalari [[servo, aci], ...] — UI 📐 butonlari doldurur
     "sh_pts": [], "el_pts": [], "gr_pts": [], "base_pts": [],
-    # PARALELKENAR KOL: dirsek servosu on kolun acisini L1'e gore DEGIL,
-    # YERE GORE (mutlak) kontrol ediyorsa True (test: yalniz shoulder oynat —
-    # on kol yere gore egimini KORUYORSA paralelkenar). el_pts o zaman
-    # [servo, beta_ABS] tutar.
+    # Paralelkenar kol: dirsek ön kolu yere göre (mutlak) kontrol ediyorsa True.
     "el_abs": False,
-    # tek-nokta fallback egim isaretleri (kullanici yon semantigi:
-    # BASE 0=SOL, SHOULDER 0=ILERI, ELBOW 0=ILERI, GRIPPER 0=GERI)
+    # Tek-nokta fallback eğim işaretleri (yön semantiği).
     "sh_sign": 1, "el_sign": 1, "gr_sign": 1, "base_sign": 1,
     "cam_f": 370.0, "cam_cx": 240.0, "cam_cy": 160.0,
     "cam_dx": 2.0, "cam_dz": 2.5, "cam_pitch": 0.0,

@@ -1,28 +1,9 @@
 """
-Graph + A* — Waypoint graph icin yol bulma.
+Graph + A* — waypoint grafında yol bulma (çift yönlü, maliyet = cm).
 
-Tasarim:
-  - Undirected (cift yonlu) graph; her kenar JSON'dan ham mesafe (cm) kullanir.
-  - A* heuristic: OLCEKLENMIS Euclidean. Ham Euclidean bazi kenarlarda olculen
-    cost'u asabilir (or. H-I: 19.1 > 18 cm), bu da heuristic=True ile A*'in
-    optimallik garantisini teknik olarak kirar. Bunu onlemek icin yukleme aninda
-    `_h_scale = min(cost / euclid)` hesaplanir ve h = _h_scale * euclid kullanilir.
-    Bu olcek hem admissible (h <= gercek cost) hem consistent (ucgen esitsizligi
-    korunur) yapar — heuristic=True artik ispatli optimal. Dijkstra (heuristic=False)
-    de h=0 ile kullanilabilir.
-  - edge_penalty: opsiyonel yumusak congestion maliyeti (kenar -> ek cm). Hard
-    block degil — A* mumkunse o kenardan kacinir ama gerekirse kullanir. Filo
-    katmani kontansiyon gradyani icin besleyebilir.
-  - blocked_nodes / blocked_edges: planner her tick'te bunlari guncelleyip
-    A*'i tekrar cagirir. Multi-agent rezervasyon mekanizmasi bu argumanlardan
-    beslenir.
-
-JSON formati (pc/waypoints.json):
-
-    {
-      "nodes": { "A": {"x": 0, "y": 0}, ... },
-      "edges": [{"from": "A", "to": "B", "cost": 20}, ...]
-    }
+Heuristic ölçeklenmiş Euclidean (_h_scale = min(cost/euclid), admissible +
+consistent). blocked_nodes/blocked_edges ile planner her tick A*'ı tekrar çağırır.
+Format (pc/waypoints.json): {"nodes": {"A": {"x":0,"y":0}}, "edges": [{"from","to","cost"}]}.
 """
 
 from __future__ import annotations
@@ -41,8 +22,7 @@ class Node:
     y:    float
 
 
-# Bir kenarin set'te tutulabilmesi icin sirali tuple olarak normalize ederiz
-# (undirected): edge_key("A", "B") == edge_key("B", "A") == ("A", "B")
+# Undirected: sıralı tuple'a normalize (A-B == B-A).
 def edge_key(a: str, b: str) -> Tuple[str, str]:
     return (a, b) if a <= b else (b, a)
 
@@ -54,8 +34,7 @@ class Graph:
     _adj:  Dict[str, List[Tuple[str, float]]] = field(default_factory=dict)
     # quick edge cost lookup, normalized key
     _ec:   Dict[Tuple[str, str], float]      = field(default_factory=dict)
-    # heuristic olcek faktoru — h = _h_scale * euclidean. from_json hesaplar:
-    # min(cost/euclid) tum kenarlarda → admissible + consistent garanti.
+    # heuristic ölçek: h = _h_scale * euclid (admissible + consistent).
     _h_scale: float = 1.0
 
     # ---- IO --------------------------------------------------------------
@@ -67,10 +46,7 @@ class Graph:
             name: Node(name=name, x=float(d["x"]), y=float(d["y"]))
             for name, d in doc["nodes"].items()
         }
-        # Firmware waypoint alanlarini tek char olarak isler (from[0]/next[0]/...),
-        # navPath bir char[]'tir. Cok-karakterli node adi ('A1') firmware'de
-        # sessizce ilk harfe kirpilir → yanlis node. Bunu veri seviyesinde
-        # yuksek sesle reddet (bkz. CLAUDE.md tek-karakter kodlama siniri).
+        # Firmware node adını tek char işler; çok-karakterli adı reddet.
         bad = [n for n in nodes if len(n) != 1]
         if bad:
             raise ValueError(
@@ -87,8 +63,7 @@ class Graph:
             g._adj[a].append((b, c))
             g._adj[b].append((a, c))            # undirected
             g._ec[edge_key(a, b)] = c
-        # Heuristic olcek faktoru: tum kenarlarda min(cost/euclid). Bu carpan
-        # h = scale*euclid'i admissible (h <= gercek cost) ve consistent yapar.
+        # Heuristic ölçek: min(cost/euclid) — admissible + consistent.
         ratios = [
             c / g.euclidean(a, b)
             for (a, b), c in g._ec.items()
@@ -143,15 +118,12 @@ class Graph:
             if edge_penalty else {}
         )
 
-        # start veya goal bloklu ise zaten bir yere varamayız (start bloklu ise
-        # baslangic disindaki node'lar uzerinden devam edilemez; ozel durumda
-        # start == goal ise kabul edilir)
+        # start == goal kabul; goal bloklu ise yol yok
         if start == goal:
             return [start]
         if goal in bn:
             return None
-        # Start node "bloklu" sayilsa bile baslangic noktasi olarak gecerli
-        # (oradayız zaten — sadece komsulara gecerken bn filtresi uygulanir)
+        # Start bloklu olsa bile başlangıç geçerli (oradayız).
 
         # f_score min-heap. counter tie-breaker (deterministik siralama).
         open_heap: List[Tuple[float, int, str]] = []

@@ -2,18 +2,12 @@
 #include <stdarg.h>
 
 // =============================================================================
-// cam_log.ino - Anlamli olaylari hem Serial'e hem ring buffer'a yazar.
+// cam_log.ino - Anlamli olaylari ring buffer'a yazar; PC /log?since=N ile ceker.
 //
-// Buffer JSON formatinda /log?since=N endpoint'i ile PC tarafindan cekilir.
-// Thread-safe (FreeRTOS mutex) - hem ana loop hem stream task'tan cagrilabilir.
+// Thread-safe (FreeRTOS mutex) - ana loop ve stream task'tan cagrilabilir.
 //
-// Sadece YUKSEK SEVIYE olaylar loglanir:
-//   - boot/init durumlari
-//   - servo hedefe ulasti
-//   - magnet on/off
-//   - stream client baglandi/koptu
-//   - hata mesajlari
-// FPS, frame sayilari, debug verileri loglanmaz.
+// Sadece ust-seviye olaylar loglanir (boot/init, servo hedefe ulasti, magnet
+// on/off, stream client baglandi/koptu, hatalar). FPS/frame/debug loglanmaz.
 // =============================================================================
 
 struct CamLogEntry {
@@ -43,8 +37,7 @@ void camLog(const char* fmt, ...) {
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
 
-    // Ring buffer (thread-safe). Serial init edilmiyor — PC /poll endpoint
-    // ile log entry'leri ceker, ekran disi kalan mesaj olmaz.
+    // Ring buffer (thread-safe). Serial yok — PC /poll ile entry'leri ceker.
     if (logMutex) xSemaphoreTake(logMutex, portMAX_DELAY);
     uint32_t seq = ++logSeqCounter;
     logRing[logHead].seq = seq;
@@ -59,9 +52,9 @@ uint32_t camLogCurrentSeq() {
     return logSeqCounter;
 }
 
-// since'tan buyuk seq'li girdileri JSON olarak doldurur.
+// since'tan buyuk seq'li girdileri JSON'a doldurur.
 // Format: {"id":"CAM_1","seq":42,"entries":[{"seq":40,"ms":12345,"msg":"..."},...]}
-// out'un en az ~2KB kapasitesi olmali (32 entry * ~60 byte).
+// out en az ~2KB olmali (32 entry * ~60 byte).
 void camLogToJson(uint32_t since, String& out) {
     out  = "{\"id\":\"";
     out += CAM_ID;

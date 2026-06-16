@@ -1,20 +1,9 @@
 """
-AGV Kontrol Merkezi (CustomTkinter)
-====================================
-PC tarafi tum AGV'leri yonetmek icin merkezi UI.
-
-Sekmeler:
-    [Navigasyon]  - Harita + komutlar + telemetri
-    [Kamera]      - ESP32-CAM yayini + tespit overlay
-    [PID]         - PID + hiz tuning
-    [Robot Kol]   - Servo + miknatis (placeholder, ESP32-CAM kontrolu icin)
-    [Log]         - Tum AGV loglari
-
-Sol kenar: AGV listesi (tikla ile aktif AGV degis)
-Ust serit: WS server URL + Bagian/Kes
+AGV Kontrol Merkezi (CustomTkinter) — tüm AGV'leri yöneten merkezi PC UI.
 """
 
 import os
+import threading
 import time
 from typing import Dict, List, Optional
 
@@ -36,50 +25,41 @@ from fleet_planner       import (
     FleetPlanner, HopAction, HopCommand,
 )
 
-# NOT: Tespit (object detection) pipeline'i tamamen kaldirildi — yeniden yazilacak.
-# Eski: detector.py (background subtraction tabanli kare/renk tespiti) + hsv_presets.json
-
 
 SERVER_URL_DEFAULT = "ws://192.168.4.1/ws"
-# Kapma config'i AGV BAZINDA ayri dosya — bkz. agv_config.pickup_config_path.
 WAYPOINTS          = list("ABCDEFGHIJKL")
 
 
-# Tema — Material Design 800/700 tonlari (dark theme)
-COL_SUCCESS         = "#2e7d32"   # baslat / OK
+# Tema — Material Design 800/700 tonları (dark theme)
+COL_SUCCESS         = "#2e7d32"   # başlat / OK
 COL_SUCCESS_HOVER   = "#1b5e20"
 COL_DANGER          = "#c62828"   # durdur / hata / acil
 COL_DANGER_HOVER    = "#8e0000"
 COL_DANGER_FLASH    = "#ff6b3d"   # acil-dur buton flash
-COL_WARN            = "#f57c00"   # uyari / kalibre
+COL_WARN            = "#f57c00"   # uyarı / kalibre
 COL_WARN_HOVER      = "#bb6500"
 COL_INFO            = "#1565c0"   # bilgi / mavi aksiyon
 COL_INFO_HOVER      = "#0d3c75"
 
-# Yardimci/yazi renkleri
-COL_MUTED           = "#9aa0a6"   # ikincil yazi (etiketler)
-COL_SUBTLE          = "#6c6c6c"   # daha sonuk (dipnot, açiklama)
-COL_BG_STATUSBAR    = "#1a1a1a"   # alt durum cubugu
-COL_BG_DEEP         = "#141414"   # video / kapali alan zemini
+# Yardımcı/yazı renkleri
+COL_MUTED           = "#9aa0a6"   # ikincil yazı (etiketler)
+COL_SUBTLE          = "#6c6c6c"   # daha sönük (dipnot, açıklama)
+COL_BG_STATUSBAR    = "#1a1a1a"   # alt durum çubuğu
+COL_BG_DEEP         = "#141414"   # video / kapalı alan zemini
 
-# Durum mesaji renkleri (text_color)
+# Durum mesajı renkleri (text_color)
 COL_TXT_OK          = "#80ff80"
 COL_TXT_WARN        = "#ffb347"
 COL_TXT_ERR         = "#ff8080"
 COL_TXT_ACCENT      = "#aaccff"
-COL_TXT_BAGLI       = "#80ff80"   # "Bagli" yesili (orange yerine yesil olur)
+COL_TXT_BAGLI       = "#80ff80"   # "Bağlı" yeşili (orange yerine yeşil olur)
 
-# Standart spacing olcegi
+# Standart spacing ölçeği
 PAD_XS = 2
 PAD_SM = 4
 PAD_MD = 8
 PAD_LG = 12
 PAD_XL = 16
-
-
-# (olu kod temizligi: fmt_ago + LabelSlider kaldirildi — HSV kalibrasyon
-# arayuzuyle birlikte islevsiz kalmislardi, hicbir cagrisi yoktu)
-
 
 class SensorBar(ctk.CTkFrame):
     """Tek bir sensor degerini dikey bar olarak gosterir."""
@@ -102,9 +82,9 @@ class SensorBar(ctk.CTkFrame):
 
 
 class AGVControlApp(ctk.CTk):
-    # UI tick aralıği — WS event queue'sundan pop + dashboard/sensor refresh.
+    # UI tick aralığı — WS event queue'sundan pop + dashboard/sensor refresh.
     # 50ms = 20 Hz, queue_wait ortalaması ~25ms (eski 100ms'de ~50ms idi).
-    # 3 AGV + 3 ESP32-CAM icin CPU yuku onemsiz; tkinter rahat kaldirir.
+    # 3 AGV + 3 ESP32-CAM için CPU yükü önemsiz; tkinter rahat kaldırır.
     UI_TICK_MS = 50
 
     def __init__(self):
@@ -116,7 +96,7 @@ class AGVControlApp(ctk.CTk):
         self.geometry("1280x780")
         self.minsize(1100, 680)
 
-        # Tipografi — Tk basladiktan sonra olusturulmali (modul seviyesinde olmaz)
+        # Tipografi — Tk başladıktan sonra oluşturulmalı (modül seviyesinde olmaz)
         self.font_h1        = ctk.CTkFont(weight="bold", size=14)
         self.font_h2        = ctk.CTkFont(weight="bold", size=12)
         self.font_body      = ctk.CTkFont(size=11)
@@ -126,16 +106,11 @@ class AGVControlApp(ctk.CTk):
         self.font_mono      = ctk.CTkFont(family="Consolas", size=12)
         self.font_mono_lg   = ctk.CTkFont(family="Consolas", size=13)
         self.font_mono_sm_b = ctk.CTkFont(family="Consolas", size=11, weight="bold")
-
-        # Durum
-        # NOT: CTk parent class'ında Wm.client() method'u var ama Optional
-        # AGVClient ile çakışmıyor (runtime'da farklı tip), tip-checker
-        # uyarısı bilinçli ignore ediliyor.
         self.client: Optional[AGVClient] = None   # type: ignore[assignment]
         self.agvs:   Dict[str, AGVState] = {}
         self.active_agv: Optional[str]   = None
-        # F4: Kamera/kol artik AGV-aware — her AGV'nin kendi ESP32-CAM'i.
-        # Per-AGV stream readers + per-AGV video labels (Robot Kol tab içinde).
+        # F4: Kamera/kol artık AGV-aware — her AGV'nin kendi ESP32-CAM'i.
+        # Per-AGV stream reader + per-AGV video label (Robot Kol tab içinde).
         self.stream_readers:  Dict[str, StreamReader]    = {}
         self.cam_fps:         Dict[str, float]           = {}
         self.cam_last_count:  Dict[str, int]             = {}
@@ -146,7 +121,7 @@ class AGVControlApp(ctk.CTk):
         self._cam_img_refs:   Dict[str, ctk.CTkImage]    = {}
 
         # F4: Robot Kol per-AGV state (servolar + magnet + speed + LED)
-        # Her AGV'nin kendi widget set'i, _make_arm_panel her AGV için ayrı build eder.
+        # Her AGV'nin kendi widget set'i; _make_arm_panel her AGV için ayrı build eder.
         self.arm_panels:      Dict[str, ctk.CTkFrame]    = {}
         self.arm_servo_vars:  Dict[str, List[ctk.IntVar]]   = {}
         self.arm_servo_lbls:  Dict[str, List[ctk.CTkLabel]] = {}
@@ -156,49 +131,54 @@ class AGVControlApp(ctk.CTk):
         self.arm_led_vars:    Dict[str, ctk.IntVar]      = {}
         self.arm_led_lbls:    Dict[str, ctk.CTkLabel]    = {}
 
-        # YOLO tespit toggle — detector singleton paylasilir (detector.py)
+        # YOLO tespit toggle — detector singleton paylaşılır (detector.py)
         self.detect_vars:     Dict[str, ctk.BooleanVar]  = {}
         self.detect_last_ms:  Dict[str, float]           = {}
         self.detect_last_n:   Dict[str, int]             = {}
 
-        # Vision-servoing: per-AGV en guncel YOLO sonucu (_process_camera doldurur;
-        # overlay cizimi kullanir). OTONOM KAPMA bu uygulamadan KALDIRILDI —
-        # test/teshis araci pc/pickup_test.py'de (PickupController orada calisir).
+        # Vision-servoing: per-AGV en güncel YOLO sonucu (_process_camera doldurur,
+        # overlay çizimi kullanır). Otonom kapma bu uygulamadan kaldırıldı —
+        # test/teşhis aracı pc/pickup_test.py'de (PickupController orada çalışır).
         self.detection_state: Dict[str, dict] = {}
-        # Per-AGV son grip mikroswitch olayi (/poll'dan; log paneline gider)
+        # Per-AGV son grip mikroswitch olayı (/poll'dan; log paneline gider)
         self.grip_state: Dict[str, dict] = {}
-        # Per-AGV /poll arm durumu {servos, targets, ts} — kontrolor GERCEK settle
-        # (servos==targets) icin okur. _cam_arm_state SADECE aktif AGV; bu per-AGV.
+        # Per-AGV /poll arm durumu {servos, targets, ts} — kontrolör gerçek settle
+        # (servos==targets) için okur. _cam_arm_state sadece aktif AGV; bu per-AGV.
         self.arm_state: Dict[str, dict] = {}
-        # Per-AGV otonom kapma kontroloru (PickupController v4); lazy olusur
+        # Per-AGV otonom kapma kontrolörü (PickupController v4); lazy oluşur
         self.auto_pickup: dict = {}
+        # Kapmadan önce kol search_pose'a geçerken bekleyen AGV'ler; pc.start()
+        # kol varana kadar ertelenir, iptal bu seti temizleyince başlamaz.
+        # _pickup_seat_target: o AGV için hedef sh/el/gr.
+        self._pickup_arming: set = set()
+        self._pickup_seat_target: Dict[str, list] = {}
 
         # Görünüm modu: dual (varsayılan) = iki AGV yan yana, single = aktif olan büyük
         self.arm_view_mode:   str  = "dual"   # "dual" | "single"
         self.arm_single_agv:  Optional[str] = None   # single mode'da gösterilen AGV
 
-        # Kapma konfig — AGV BAZINDA ayri dosya (pickup_config_<AGV_ID>.json):
+        # Kapma konfig — AGV bazında ayrı dosya (pickup_config_<AGV_ID>.json):
         # autonomous.safe_envelope (arm_sim) + kinematics + trim. Her kol fiziksel
-        # olarak farkli oldugundan AGV bazinda RAM cache; _pickup_cfg(agv_id) lazy
-        # yukler. Eski tek pickup_config.json varsa AGV_1'e migrate edilir.
+        # olarak farklı olduğundan AGV bazında RAM cache; _pickup_cfg(agv_id) lazy
+        # yükler. Eski tek pickup_config.json varsa AGV_1'e migrate edilir.
         migrate_legacy_pickup_config("AGV_1")
         self.pickup_cfgs: Dict[str, Dict] = {}
 
-        # ESP32-CAM log polling — her AGV icin ayri thread, AGV connect olunca
-        # otomatik baslar. Stream sekmesinden bagimsiz: GRIP olaylari Arm
-        # sekmesi acik olmasa da Log paneline akar.
+        # ESP32-CAM log polling — her AGV için ayrı thread, AGV connect olunca
+        # otomatik başlar. Stream sekmesinden bağımsız: grip olayları Arm
+        # sekmesi açık olmasa da Log paneline akar.
         import threading as _t
         self._cam_log_stop_evt:   _t.Event                = _t.Event()
         self._cam_log_threads:    Dict[str, _t.Thread]    = {}
         self._cam_log_last_seq:   Dict[str, int]          = {}
         self._cam_grip_last_seq:  Dict[str, int]          = {}
-        # /poll ile gelen son arm state — drag etmeyen UI guncellenmeleri icin
+        # /poll ile gelen son arm state — drag etmeyen UI güncellemeleri için
         self._cam_arm_state: Dict = {}
 
-        # UI'da maksimum log satiri
+        # UI'da maksimum log satırı
         self.MAX_LOG_LINES = 500
 
-        # Sensor gecmisi (her agvUpdate'da bir satir)
+        # Sensör geçmişi (her agvUpdate'da bir satır)
         self.MAX_SENSOR_LINES = 500
         self._sensor_lines: List[tuple] = []   # (timestamp, agv_id, sensors[8], linePos, sonarDist, navState)
 
@@ -207,20 +187,20 @@ class AGVControlApp(ctk.CTk):
             os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "calibration_presets.json")
         )
-        # F2: AGV donanim/baglanti config (her AGV'nin kendi ESP32-CAM URL'si)
+        # F2: AGV donanım/bağlantı config (her AGV'nin kendi ESP32-CAM URL'si)
         self.agv_config_store = AGVConfigStore(
             os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "agv_config.json")
         )
-        # AGV bazinda son alinan ham kalibrasyon verisi — "Preset kaydet" icin
+        # AGV bazında son alınan ham kalibrasyon verisi — "Preset kaydet" için
         self._last_calib_data: Dict[str, CalibrationDataEvent] = {}
-        # AGV'nin onceki baglanti durumu — disconnect→connect gecisinde auto-apply
+        # AGV'nin önceki bağlantı durumu — disconnect→connect geçişinde auto-apply
         self._was_connected: Dict[str, bool] = {}
-        # Kalibrasyon debounce — son "calibrate" gonderiminin zamani (per AGV)
-        # Kullanici butona art arda basamasin, AGV onboard 8 sn + 2 sn LED = 10 sn
+        # Kalibrasyon debounce — son "calibrate" gönderiminin zamanı (per AGV).
+        # Kullanıcı butona art arda basmasın; AGV onboard 8 sn + 2 sn LED = 10 sn.
         self._last_calibrate_sent: Dict[str, float] = {}
         self.CALIBRATE_DEBOUNCE_SEC = 12.0
-        # Aktif geri sayim state'i — sadece bir AGV ayni anda kalibre olur
+        # Aktif geri sayım state'i — aynı anda yalnız bir AGV kalibre olur
         self._calib_countdown_agv:        Optional[str] = None
         self._calib_countdown_remaining:  int           = 0
         self._calib_countdown_after_id                  = None
@@ -228,43 +208,51 @@ class AGVControlApp(ctk.CTk):
 
         # ===== Multi-AGV planner (background) =====
         # AGVControlApp her zaman aktif planner tutar. Operations'ta verilen
-        # hedefler planner.add_mission'a yonlendirilir; planner setHop emirleri
-        # uretip dispatch eder. Cakisma cozumu, parked AGV obstacle, mid-flight
-        # rerouting otomatik. Kullanici sadece hedef verir.
+        # hedefler planner.add_mission'a yönlendirilir; planner setHop emirleri
+        # üretip dispatch eder. Çakışma çözümü, parked AGV obstacle, mid-flight
+        # rerouting otomatik. Kullanıcı sadece hedef verir.
         _wp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "waypoints.json")
         self.fleet_graph   = Graph.from_json(_wp_path)
         self.fleet_planner = FleetPlanner(self.fleet_graph)
-        # FP-01 production deadlock korumasi: planner olay-guduculdur; tum AGV'ler
-        # ayni anda WAIT'e duserse hopComplete gelmez, tick re-invoke olmaz, filo
-        # kalici donar. Periyodik nabiz + watchdog bunu kirar.
-        self.PLANNER_PULSE_SEC = 1.0     # aktif mission varken nabiz araligi
-        self.DEADLOCK_PULSES   = 5       # bu kadar ardisik all-WAIT nabiz = deadlock
+        # FP-01 production deadlock koruması: planner olay-güdümlüdür; tüm AGV'ler
+        # aynı anda WAIT'e düşerse hopComplete gelmez, tick re-invoke olmaz, filo
+        # kalıcı donar. Periyodik nabız + watchdog bunu kırar.
+        self.PLANNER_PULSE_SEC = 1.0     # aktif mission varken nabız aralığı
+        self.DEADLOCK_PULSES   = 5       # bu kadar ardışık all-WAIT nabız = deadlock
         self._last_planner_pulse = 0.0
         self._deadlock_alarmed   = False
-        # Dedup: ayni (from, next, after) tuple'i ust uste gondermek hem ag
-        # trafigi hem AGV firmware'inde stale msg overwrite riski yaratir.
-        # tick AGV_X icin AGV_Y'nin hopComplete'i ile tekrar tetikledigi zaman
-        # AGV_X icin emir degismediyse atla.
+        # Dedup: aynı (from, next, after) tuple'ını üst üste göndermek hem ağ
+        # trafiği hem AGV firmware'inde stale msg overwrite riski yaratır. tick
+        # AGV_X için AGV_Y'nin hopComplete'iyle tekrar tetiklendiğinde, AGV_X'in
+        # emri değişmediyse atla.
         self._last_dispatched_hop: Dict[str, tuple] = {}
 
-        # ===== Kup deposu + tasima orkestrasyonu =====
-        # 4 fiziksel kup, baslangicta yeri NULL; kullanici haritadan yerlestirir
-        # (node + cizgisiz kenar), tasima sirasinda SISTEM gunceller:
-        # al → carrier=AGV; birak → yeni node+side. cubes.json'da kalici.
+        # ===== Küp deposu + taşıma orkestrasyonu =====
+        # 4 fiziksel küp, başlangıçta yeri null; kullanıcı haritadan yerleştirir
+        # (node + çizgisiz kenar), taşıma sırasında sistem günceller: al →
+        # carrier=AGV, bırak → yeni node+side. cubes.json'da kalıcı.
         self.cube_store = CubeStore(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "cubes.json")
         )
-        # Per-AGV aktif kup operasyonu:
+        # Per-AGV aktif küp operasyonu:
         #   {kind: "fetch"|"drop", phase, cube_id, node, side, deadline}
-        # Fazlar: GOTO (planner gorevi) → FACE (faceDir donusu) →
+        # Fazlar: GOTO (planner görevi) → FACE (faceDir dönüşü) →
         #         fetch: WARMUP (kamera+YOLO) → PICKUP (PickupController)
-        #         drop:  RELEASE (IK poz + miknatis KAPAT + HOME)
+        #         drop:  RELEASE (sabit drop_pose → 2 sn bekle → mıknatıs kapat → HOME)
         self.cube_ops: Dict[str, dict] = {}
+
+        # YOLO tespiti arka thread'de — UI thread'inde inference UI'yı donduruyordu
+        # (her frame'de onlarca-yüzlerce ms blok → tespit kaçıyordu). Thread taze
+        # frame'i okuyup detect eder; UI tick yalnız son sonucu çizer.
+        self._det_results: Dict[str, dict] = {}
+        self._detect_stop = threading.Event()
 
         self._build_ui()
         self._cubes_redraw()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._detect_thread = threading.Thread(target=self._detect_loop, daemon=True)
+        self._detect_thread.start()
         self.after(self.UI_TICK_MS, self._tick)
 
     # =========================================================================
@@ -382,7 +370,6 @@ class AGVControlApp(ctk.CTk):
                                        fg_color=COL_BG_STATUSBAR, height=22)
         self.status_bar.pack(fill="x", side="bottom")
 
-    # ---------- Navigasyon sekmesi ----------
     # ---------- Operations sekmesi (eski Navigasyon, F3) ----------
     # Harita + komut paneli + telemetri. Dashboard kaldırıldığı için tüm
     # mission-control içeriği burada toplandı.
@@ -403,8 +390,9 @@ class AGVControlApp(ctk.CTk):
         self.map_widget = WaypointCanvas(map_frame, on_target_click=self._on_map_target)
         self.map_widget.pack(fill="both", expand=True, padx=8, pady=8)
 
-        # Sag-ust: hizli komut
-        cmd_frame = ctk.CTkFrame(nav)
+        # Sag-ust: hizli komut. Scrollable — küp paneli eklenince içerik uzadı,
+        # kısa pencerede alt kısım kesilmesin.
+        cmd_frame = ctk.CTkScrollableFrame(nav)
         cmd_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0), pady=(0, 4))
         ctk.CTkLabel(cmd_frame, text="HIZLI KOMUT",
                      font=self.font_h2).pack(pady=(6, 6))
@@ -435,14 +423,14 @@ class AGVControlApp(ctk.CTk):
         ctk.CTkButton(btn_frame, text="■ DURDUR", height=44,
                       fg_color=COL_DANGER, hover_color=COL_DANGER_HOVER,
                       command=lambda: self._cmd_command("stop")).pack(fill="x", pady=3)
-        # Tekil gorev iptali (FP-09): DURDUR yalniz WS STOP yollar, planner
-        # mission'i ACTIVE kalir → sonraki hopComplete onu yeniden dispatch eder.
-        # Bu buton planner mission'ini gercekten iptal eder (filonun geri kalanina
+        # Tekil görev iptali (FP-09): DURDUR yalnız WS STOP yollar, planner
+        # mission'ı ACTIVE kalır ve sonraki hopComplete onu yeniden dispatch eder.
+        # Bu buton planner mission'ını gerçekten iptal eder (filonun geri kalanına
         # dokunmadan) + clearMission + STOP.
         ctk.CTkButton(btn_frame, text="⏹ Görevi İptal (planner)", height=36,
                       fg_color=COL_WARN, hover_color=COL_WARN,
                       command=self._cmd_cancel_mission).pack(fill="x", pady=3)
-        # NOT: Kalibrasyon butonu Sensör sekmesindeki preset paneline taşındı —
+        # Not: kalibrasyon butonu Sensör sekmesindeki preset paneline taşındı —
         # tek kaynak (geri sayım + sonuç status'u orada gösteriliyor)
 
         # Aktif yol/yon ozeti
@@ -455,8 +443,8 @@ class AGVControlApp(ctk.CTk):
         # Yerleştirme ayrı "Küpler" sekmesinde; burası operasyon başlatma.
         self._build_cube_pickup_panel(cmd_frame)
 
-        # (PID + Hiz kontrolleri Sensors sekmesine tasindi — kalibrasyon
-        # panelinin altinda; _build_pid_panel)
+        # (PID + Hız kontrolleri Sensors sekmesine taşındı — kalibrasyon
+        # panelinin altında; _build_pid_panel)
 
         # Alt: telemetri
         tel_frame = ctk.CTkFrame(nav)
@@ -490,44 +478,9 @@ class AGVControlApp(ctk.CTk):
             b.grid(row=0, column=i, padx=2)
             self.sensor_bars.append(b)
 
-    # ---------- Planner tab kaldirildi ----------
-    # Multi-AGV fleet planner artik background'da otomatik calisir
-    # (AGVControlApp.fleet_planner instance). Operations tab "Hedef Ata"
-    # butonu setTarget yerine planner.add_mission + setHop dispatch yapar.
-    # Cakisma cozumu, parked AGV obstacle, mid-flight rerouting hepsi
-    # otomatik. Kullanici sadece hedef verir.
-    #
-    # Standalone debug aracı pc/planner_viewer.py kaldirildi.
-
-    # ---------- Kamera tab kaldırıldı (F4) ----------
-    # Stream gösterimi Robot Kol tab'ına alındı. Cam URL'leri agv_config.json'da
-    # AGV başına saklı (her AGV'nin kendi ESP32-CAM'i — varsayılan IP 192.168.4.50+N).
-    # Eski KAPMA/TARAMA KALIBRASYONU paneli + base sweep state machine KALDIRILDI:
-    # tarama PickupController.SCAN'in isi, guvenli bolge arm_sim sihirbazindan gelir.
-
-    # ---------- OTONOM KAPMA — bu uygulamadan KALDIRILDI ----------
-    # Test/teshis araci pc/pickup_test.py'de: PickupController + canli YOLO
-    # overlay + adim adim tick + detayli log + ACIL DUR. Sorun cozulup sekans
-    # stabillesince buraya tek butonla geri baglanacak.
-
-    # =========================================================================
-    # F4 — Robot Kol tab (dual/single view, per-AGV camera + servo + magnet)
-    # =========================================================================
-    # Tasarım: üstte view-mode toggle (Çift/Tek) + AGV dropdown (Tek için).
-    # Orta: arm_panels_container — view mode değişince yeniden inşa.
-    #   Çift: yan yana her bağlı AGV için panel
-    #   Tek:  seçili AGV için tek büyük panel
-    # Alt: KAPMA KALIBRASYONU (aktif AGV bazlı, tek kaynak).
-    #
-    # State (per-AGV, agv_id key'li dict):
-    #   - arm_servo_vars[id] = [IntVar × 4]   ← rebuild'de korunur
-    #   - arm_magnet_vars[id]                  ← rebuild'de korunur
-    #   - cam_video_lbls[id], cam_info_lbls[id] ← rebuild'de yeniden yaratılır
-
     _ARM_THROTTLE_S = 0.10
     SERVO_DEFS: List[tuple] = [
-        # (isim, alt, MIN, MAX, HOME) — TEST: tüm limitler 0–180 (açıları tam görmek için).
-        # ⚠ Yazılım koruması yok; kol çarpabilir. Kalibrasyon sonrası limitler geri konmalı.
+        # (isim, alt, MIN, MAX, HOME) — test: tüm limitler 0–180 (açıları tam görmek için).
         ("Base",     "GPIO 14 - MG996R",    0, 180,  93),
         ("Shoulder", "GPIO 13 - DS3218MG",  0, 180, 120),
         ("Elbow",    "GPIO 15 - MG996R",    0, 180,  15),
@@ -553,7 +506,7 @@ class AGVControlApp(ctk.CTk):
         self.arm_left_scroll = ctk.CTkScrollableFrame(arm)
         self.arm_left_scroll.grid(row=1, column=0, sticky="nsew", padx=(8, 4), pady=4)
 
-        # Sağ scrollable: OTONOM KAPMA paneli (aktif AGV'ye göre _refresh_arm_panel doldurur)
+        # Sağ scrollable: otonom kapma paneli (aktif AGV'ye göre _refresh_arm_panel doldurur)
         self.arm_right_scroll = ctk.CTkScrollableFrame(arm)
         self.arm_right_scroll.grid(row=1, column=1, sticky="nsew", padx=(4, 8), pady=4)
 
@@ -605,14 +558,14 @@ class AGVControlApp(ctk.CTk):
 
         for child in self.arm_left_scroll.winfo_children():
             child.destroy()
-        # Eski widget referansları sıfırlanır (yeni active AGV için yenileri yaratılır)
+        # Eski widget referansları sıfırlanır (yeni aktif AGV için yenileri yaratılır)
         self.cam_video_lbls.clear()
         self.cam_info_lbls.clear()
 
-        # Kol + kamera + otonom kapma HTTP-DIREKT calisir (WS/AGV baglantisi
-        # GEREKMEZ). AGV WS'e bagli degilse yapilandirilmis (cam URL'li) ilk
-        # kamerayi kullan; o da yoksa varsayilan tek kol. Boylece cihaz bagli
-        # olmasa da Arm sekmesi + kapma paneli gorunur ve kullanilir.
+        # Kol + kamera + otonom kapma doğrudan HTTP ile çalışır (WS/AGV bağlantısı
+        # gerekmez). AGV WS'e bağlı değilse yapılandırılmış (cam URL'li) ilk
+        # kamerayı kullan; o da yoksa varsayılan tek kol. Böylece cihaz bağlı
+        # olmasa da Arm sekmesi + kapma paneli görünür ve kullanılır.
         agv_id = self.active_agv
         if not agv_id:
             cfg_ids = sorted(self.agv_config_store.agvs.keys())
@@ -627,7 +580,7 @@ class AGVControlApp(ctk.CTk):
         self._build_arm_cam_section(self.arm_left_scroll, agv_id)
         self._build_arm_controls_section(self.arm_left_scroll, agv_id)
 
-        # Sağ kolon: OTONOM KAPMA paneli (aktif AGV için)
+        # Sağ kolon: otonom kapma paneli (aktif AGV için)
         if hasattr(self, "arm_right_scroll"):
             for child in self.arm_right_scroll.winfo_children():
                 child.destroy()
@@ -635,9 +588,9 @@ class AGVControlApp(ctk.CTk):
 
         # Stream sadece bu AGV için açık olsun
         self._sync_stream_readers(visible=[agv_id])
-        # /poll thread'i (grip olaylari + arm_state) — WS baglantisindan BAGIMSIZ
-        # baslat ki cihaz WS'e bagli olmasa da otonom kapma butonu algilasin
-        # (cam URL'si yapilandirilmamissa sessizce atlar; idempotent).
+        # /poll thread'i (grip olayları + arm_state) — WS bağlantısından bağımsız
+        # başlat ki cihaz WS'e bağlı olmasa da otonom kapma butonu algılasın
+        # (cam URL'si yapılandırılmamışsa sessizce atlar; idempotent).
         self._cam_log_start_for_agv(agv_id)
 
     def _build_arm_cam_section(self, parent, agv_id: str):
@@ -1347,7 +1300,7 @@ class AGVControlApp(ctk.CTk):
             return
         p = self.preset_store.add(name, data.sensorMin, data.sensorMax,
                                    agvSource=data.agvId)
-        # Yeni kaydedilen aktif yap
+        # Yeni kaydedileni aktif yap
         self.preset_store.set_active(self.active_agv, p.name)
         self._update_preset_panel()
         self._set_status(f"Preset kaydedildi: {p.name}")
@@ -1386,8 +1339,8 @@ class AGVControlApp(ctk.CTk):
             bar, values=["Hepsi"], variable=self.log_filter_var,
             width=140, command=lambda _: self._refresh_log())
         self.log_filter.pack(side="left", padx=4)
-        # DEBUG TIMING toggle — WS mesaj akisi + planner tick + dispatch
-        # latency'lerini log paneline yansitir. Default kapali (spam'i onler).
+        # DBG timing toggle — WS mesaj akışı + planner tick + dispatch
+        # latency'lerini log paneline yansıtır. Varsayılan kapalı (spam'i önler).
         self.debug_timing_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             bar, text="DBG timing", variable=self.debug_timing_var,
@@ -1404,8 +1357,8 @@ class AGVControlApp(ctk.CTk):
 
     def _on_debug_timing_toggle(self):
         """DBG timing checkbox callback — WS client'in debug_timing flag'ini
-        guncelle. Aktifken WS trafik + planner tick + dispatch latency log
-        paneline yansir."""
+        günceller. Aktifken WS trafik + planner tick + dispatch latency log
+        paneline yansır."""
         enabled = self.debug_timing_var.get()
         if self.client is not None:
             self.client.debug_timing = enabled
@@ -1416,7 +1369,7 @@ class AGVControlApp(ctk.CTk):
         ))
 
     # =========================================================================
-    # WS Baglanti
+    # WS Bağlantı
     # =========================================================================
     def _connect(self):
         if self.client is not None:
@@ -1426,7 +1379,7 @@ class AGVControlApp(ctk.CTk):
             self._set_status("URL bos olamaz", err=True)
             return
         self.client = AGVClient(url)
-        # Reconnect sonrasi DBG timing seçimini geri uygula
+        # Reconnect sonrası DBG timing seçimini geri uygula
         if hasattr(self, "debug_timing_var"):
             self.client.debug_timing = self.debug_timing_var.get()
         self.client.start()
@@ -1445,13 +1398,13 @@ class AGVControlApp(ctk.CTk):
         self._update_active_agv_indicator()
 
     # -------------------------------------------------------------------------
-    # ACIL DUR - tum AGV'leri durdur + tum CAM kollarini dondur
+    # ACİL DUR - tüm AGV'leri durdur + tüm CAM kollarını dondur
     # -------------------------------------------------------------------------
     def _emergency_stop(self):
         actions = []
 
-        # 0. Kup operasyonlari + harita yerlestirme modu iptal (faceDir/kapma
-        # zinciri devam etmesin; firmware STOP'u asagida zaten gidiyor)
+        # 0. Küp operasyonları + harita yerleştirme modu iptal (faceDir/kapma
+        # zinciri devam etmesin; firmware STOP'u aşağıda zaten gidiyor)
         if self.cube_ops:
             self.cube_ops.clear()
             self._refresh_cube_panel()
@@ -1463,14 +1416,14 @@ class AGVControlApp(ctk.CTk):
         except Exception:
             pass
 
-        # 1. Planner mission'larini iptal et + her AGV'ye clearMission/STOP
+        # 1. Planner mission'larını iptal et + her AGV'ye clearMission/STOP
         try:
             self._planner_clear_all()
             actions.append("Planner mission'lari iptal")
         except Exception:
             pass
 
-        # 2. Tum AGV'lere STOP komutu (WS broadcast) — clearMission'a ek olarak
+        # 2. Tüm AGV'lere STOP komutu (WS broadcast) — clearMission'a ek olarak
         if self.client is not None and self.agvs:
             for agv_id in list(self.agvs.keys()):
                 try:
@@ -1479,10 +1432,10 @@ class AGVControlApp(ctk.CTk):
                 except Exception:
                     pass
 
-        # 2. Tum AGV'lerin ESP32-CAM kollarini freeze + MIKNATIS KAPAT (F4: per-AGV URLs)
-        # Kup tutulurken ACIL DUR'a basilirsa miknatis surekli DC enerjili kalir
-        # (5-10dk'da 80°C+ termal risk). /arm/freeze yalniz servolari dondurur,
-        # magnete dokunmaz — bu yuzden ayrica /magnet?s=0 cagrilir (AP-03).
+        # 2. Tüm AGV'lerin ESP32-CAM kollarını freeze + mıknatıs kapat (F4: per-AGV URL)
+        # Küp tutulurken ACİL DUR'a basılırsa mıknatıs sürekli DC enerjili kalır
+        # (5-10 dk'da 80°C+ termal risk). /arm/freeze yalnız servoları dondurur,
+        # mıknatısa dokunmaz — bu yüzden ayrıca /magnet?s=0 çağrılır (AP-03).
         if hasattr(self, "agv_config_store") and self.agvs:
             import threading, urllib.request
             def freeze_worker(u: str):
@@ -1500,7 +1453,7 @@ class AGVControlApp(ctk.CTk):
                                      daemon=True).start()
                     actions.append(f"{agv_id} kol freeze + mıknatıs OFF")
 
-        # 3. Aktif otonom kapma kontrolorlerini durdur (miknatis OFF + kosu bitir)
+        # 3. Aktif otonom kapma kontrolörlerini durdur (mıknatıs kapat + koşu bitir)
         for agv_id, pc in list(self.auto_pickup.items()):
             try:
                 if getattr(pc, "active", False):
@@ -1508,11 +1461,15 @@ class AGVControlApp(ctk.CTk):
                     actions.append(f"{agv_id} kapma iptal")
             except Exception:
                 pass
+        # 3b. Tarama pozuna geçiş (arming) penceresindekileri iptal et — settle
+        #     sonrası _pickup_begin başlatmasın.
+        if self._pickup_arming:
+            self._pickup_arming.clear()
 
         # 4. UI feedback
         msg = "ACİL DUR: " + (", ".join(actions) if actions else "yapılacak iş yok")
         self._set_status(msg, err=True)
-        # Buton'u kisa sure flash et (kullanici Esc bastiysa visual feedback)
+        # Butonu kısa süre flash et (kullanıcı Esc bastıysa görsel geri bildirim)
         try:
             orig = self.estop_btn.cget("fg_color")
             self.estop_btn.configure(fg_color=COL_DANGER_FLASH)
@@ -1525,6 +1482,7 @@ class AGVControlApp(ctk.CTk):
             if self.client is not None:
                 self.client.stop()
         finally:
+            self._detect_stop.set()            # tespit thread'ini durdur
             # Tüm AGV stream reader'larını kapat (F4 — per-AGV dict)
             for reader in list(self.stream_readers.values()):
                 try:
@@ -1545,9 +1503,9 @@ class AGVControlApp(ctk.CTk):
         prev_active = self.active_agv   # Auto-select değişimini yakalamak için
         ids = sorted(self.agvs.keys())
 
-        # OPTIMIZASYON: butonlar yalniz AGV KUMESI degisince yeniden kurulur.
-        # Eski kod her agvUpdate'te (2 Hz x N AGV) destroy+recreate yapiyordu —
-        # flicker + bosa CPU. Kume ayniyken asagida sadece configure edilir.
+        # Optimizasyon: butonlar yalnız AGV kümesi değişince yeniden kurulur.
+        # Eski kod her agvUpdate'te (2 Hz x N AGV) destroy+recreate yapıyordu —
+        # flicker + boşa CPU. Küme aynıyken aşağıda sadece configure edilir.
         if set(self.agv_buttons.keys()) != set(ids):
             for w in self.agv_list_inner.winfo_children():
                 w.destroy()
@@ -1562,7 +1520,7 @@ class AGVControlApp(ctk.CTk):
                 )
                 btn.pack(fill="x", padx=2, pady=3)
                 self.agv_buttons[agv_id] = btn
-            # Log + sensör filtreleri de yalniz kume degisince guncellensin
+            # Log + sensör filtreleri de yalnız küme değişince güncellensin
             opts = ["Hepsi"] + ids
             self.log_filter.configure(values=opts)
             self.sensor_filter.configure(values=opts)
@@ -1573,17 +1531,17 @@ class AGVControlApp(ctk.CTk):
                 self._update_preset_panel()
             return
 
-        # Aktif AGV gecerli mi?
+        # Aktif AGV geçerli mi?
         if self.active_agv not in self.agvs:
             self.active_agv = None
         if self.active_agv is None:
-            # Ilk bagli olani sec
+            # İlk bağlı olanı seç
             for agv_id in ids:
                 if self.agvs[agv_id].connected:
                     self.active_agv = agv_id
                     break
 
-        # In-place metin + renk guncelle (rebuild YOK)
+        # In-place metin + renk güncelle (rebuild yok)
         for agv_id in ids:
             s = self.agvs[agv_id]
             label = (f"{agv_id}\n"
@@ -1600,11 +1558,11 @@ class AGVControlApp(ctk.CTk):
             self._update_active_agv_indicator()
 
     def _select_agv(self, agv_id: str):
-        # Aktif AGV degisiyor: ESKI AGV'nin kapma kontroloru calisiyorsa durdur
-        # — stream sadece aktif AGV icin acik kalir, eski kontrolor tespitsiz
-        # kor calisip lost-abort'a duserdi; temiz durdurmak daha guvenli.
-        # ISTISNA: kup operasyonu (otonom fetch) suruyorsa DURDURMA —
-        # _sync_stream_readers o AGV'nin stream'ini artik acik tutuyor.
+        # Aktif AGV değişiyor: eski AGV'nin kapma kontrolörü çalışıyorsa durdur
+        # — stream sadece aktif AGV için açık kalır, eski kontrolör tespitsiz
+        # kör çalışıp lost-abort'a düşerdi; temiz durdurmak daha güvenli.
+        # İstisna: küp operasyonu (otonom fetch) sürüyorsa durdurma —
+        # _sync_stream_readers o AGV'nin stream'ini açık tutuyor.
         if self.active_agv and self.active_agv != agv_id:
             old = self.auto_pickup.get(self.active_agv)
             if (old is not None and getattr(old, "active", False)
@@ -1621,11 +1579,11 @@ class AGVControlApp(ctk.CTk):
         self._refresh_cube_panel()         # Bırak butonu aktif AGV'ye bağlı
 
     # =========================================================================
-    # Aktif AGV gosterimi
+    # Aktif AGV gösterimi
     # =========================================================================
     def _update_active_view(self):
         # Harita: her durumda multi-AGV. Aktif AGV varsa onu vurgula
-        # (heading + target ring), digerleri kendi renklerinde gozukur.
+        # (heading + target ring), diğerleri kendi renklerinde görünür.
         self._refresh_operations_map()
 
         if self.active_agv is None or self.active_agv not in self.agvs:
@@ -1660,7 +1618,7 @@ class AGVControlApp(ctk.CTk):
         self.tel_calib.configure(text=f"Kalibre: {'EVET' if s.calibrated else 'HAYIR'}",
                                   text_color=COL_TXT_BAGLI if s.calibrated else "orange")
 
-        # Sensor barlari (Operations tab) + Kalibrasyon tab canli barlari (F5)
+        # Sensör barları (Operations tab) + Kalibrasyon tab canlı barları (F5)
         for i, b in enumerate(self.sensor_bars):
             v = s.sensors[i] if i < len(s.sensors) else 0
             b.set_value(v)
@@ -1668,7 +1626,7 @@ class AGVControlApp(ctk.CTk):
             v = s.sensors[i] if i < len(s.sensors) else 0
             b.set_value(v)
 
-        # PID/hiz durumu
+        # PID/hız durumu
         self.pid_status_lbl.configure(
             text=f"Mevcut: Kp={s.Kp:.3f}  Ki={s.Ki:.3f}  Kd={s.Kd:.3f}  Hiz={s.baseSpeed}"
         )
@@ -2051,7 +2009,11 @@ class AGVControlApp(ctk.CTk):
         if not node:
             return
         m = self.fleet_planner.missions.get(agv_id)
-        if m is None or m.pos == node:
+        if m is None:
+            # Görevsiz AGV'nin konumunu da engel olarak bildir (çarpışma).
+            self.fleet_planner.set_agv_position(agv_id, node)
+            return
+        if m.pos == node:
             return
         pos_before  = m.pos
         path_before = list(m.path)
@@ -2432,12 +2394,59 @@ class AGVControlApp(ctk.CTk):
         if pc is not None and pc.active:
             self._set_status("Kapma zaten çalışıyor", err=True)
             return
+        if agv_id in self._pickup_arming:
+            return   # zaten tarama pozuna geçiyor
+        # Kapma belli bir pozdan başlasın: önce servoları search_pose'a getir,
+        # otursun, sonra başlat. Taze küp tespiti varsa base'i koru (küpe bakıyor,
+        # kaçırma); yoksa base de search_pose'a.
+        auto = self._pickup_cfg(agv_id).get("autonomous", {}) or {}
+        sp = auto.get("search_pose") or [90, 130, 10, 75]
+        speed = int(auto.get("pickup_speed_ms", 40) or 40)
+        det = self.detection_state.get(agv_id)
+        fresh_cube = bool(det and time.time() - float(det.get("ts", 0)) < 0.6)
+        self._arm_http_get(agv_id, f"/servo/speed?ms={speed}")
+        self._arm_http_get(agv_id, f"/servo?id=1&a={int(sp[1])}")   # shoulder önce
+        self._arm_http_get(agv_id, f"/servo?id=2&a={int(sp[2])}")
+        self._arm_http_get(agv_id, f"/servo?id=3&a={int(sp[3])}")
+        if not fresh_cube:
+            self._arm_http_get(agv_id, f"/servo?id=0&a={int(sp[0])}")
+        # Hedef sh/el/gr — _pickup_begin kol buraya varana kadar bekler (sabit
+        # süre yetmiyordu: kol yarı yoldayken pc.start() pozu "zarf dışı" sayıyordu).
+        self._pickup_seat_target[agv_id] = [int(sp[1]), int(sp[2]), int(sp[3])]
+        self._pickup_arming.add(agv_id)
+        self._pickup_log(agv_id, "🦾 tarama pozuna geçiliyor — oturunca kapma başlar")
+        self.after(300, lambda a=agv_id: self._pickup_begin(a, 0))
+
+    def _pickup_begin(self, agv_id: str, tries: int = 0):
+        """Kol search_pose'a varınca kapmayı başlat (arm_state ile sh/el/gr ≈
+        hedef diye bakıyoruz). Arming bu arada iptal edildiyse başlatma; arm_state
+        gelmezse de max denemeden sonra yine başlat."""
+        if agv_id not in self._pickup_arming:
+            return   # iptal edildi (ACİL DUR / op temizlendi)
+        # Kol hedef poza vardı mı? (sh/el/gr; base prescan/ortalamadan kaldığı yer)
+        tgt = self._pickup_seat_target.get(agv_id)
+        st  = self.arm_state.get(agv_id) or {}
+        servos = st.get("servos")
+        settled = True
+        if tgt is not None and servos and len(servos) >= 4:
+            settled = all(abs(float(servos[1 + i]) - tgt[i]) <= 6 for i in range(3))
+        if not settled and tries < self.PICKUP_SEAT_MAX_TRIES:
+            self.after(200, lambda a=agv_id, t=tries + 1: self._pickup_begin(a, t))
+            return
+        self._pickup_arming.discard(agv_id)
+        self._pickup_seat_target.pop(agv_id, None)
+        # YOLO bu arada kapandıysa (ACİL DUR) başlatma
+        if not (self.detect_vars.get(agv_id) and self.detect_vars[agv_id].get()):
+            return
         pc = self._pickup_get(agv_id)
+        if pc.active:
+            return
         ok = pc.start()
         if not ok:
             self._set_status(f"Kapma başlamadı: {pc.message}", err=True)
 
     def _pickup_stop(self, agv_id: str):
+        self._pickup_arming.discard(agv_id)   # arming penceresindeyse iptal
         pc = self.auto_pickup.get(agv_id)
         if pc is not None:
             pc.stop()
@@ -2505,22 +2514,44 @@ class AGVControlApp(ctk.CTk):
     # =========================================================================
     # KÜPLER — yerleştirme (harita) + al/bırak orkestrasyonu
     # =========================================================================
-    # Akış (kullanıcı kararı): 4 küp başta NULL; kullanıcı haritadan node +
-    # çizgisiz kenar işaretler. "Al": planner görevi → faceDir(side) →
-    # faceComplete → kamera/YOLO warmup → PickupController → GRABBED'de
-    # carrier=AGV + kol HOME (mıknatıs açık, taşıma pozu). "Bırak": faceDir →
-    # IK ön-aşağı poz → mıknatıs KAPAT → HOME → küp yeni node+side'a yazılır.
+    # Akış: 4 küp başta boş, kullanıcı haritadan node + çizgisiz kenar işaretler.
+    # "Al": planner görevi → faceDir → arama (base süpürme) → kapma → GRABBED'de
+    # carrier=AGV, kol HOME (mıknatıs açık, taşıma pozu). "Bırak": faceDir →
+    # sabit drop_pose → mıknatıs kapat → HOME → küp yeni node+side'a yazılır.
 
     CUBE_GOTO_TIMEOUT_S   = 180.0   # planner görevi (çok hop + yield olabilir)
     CUBE_FACE_TIMEOUT_S   = 40.0    # faceDir → faceComplete
-    CUBE_SEARCH_TIMEOUT_S = 35.0    # base süpürme arama güvenlik süresi
+    CUBE_SEARCH_TIMEOUT_S = 50.0    # arama güvenlik süresi (yavaş hız + 3 leg uzun)
     CUBE_DELIVER_HOME_S   = 3.5     # GRABBED sonrası kol HOME otursun, sonra taşı
-    # Küp arama (base servosu süpürme) — config override edilebilir, AGV bazında
+    # Küp arama (base süpürme) — config'ten AGV bazında değiştirilebilir
     SEARCH_BASE_MIN_DEFAULT  = 40    # süpürme alt açısı
     SEARCH_BASE_MAX_DEFAULT  = 140   # süpürme üst açısı
-    SEARCH_SWEEPS_DEFAULT    = 2     # kaç git-gel tur; bulamazsa "küp bulunamadı"
+    SEARCH_SWEEPS_DEFAULT    = 3     # leg sayısı (40→140 bir leg, 140→40 bir leg)
+    SEARCH_SPEED_MS_DEFAULT  = 65    # arama base hızı (ms/adım); kapmadan yavaş —
+                                     # YOLO yakalasın diye. Kapmada normale döner.
     SEARCH_ARRIVE_TOL        = 4     # base hedefe bu kadar yaklaşınca "vardı"
-    SEARCH_SETTLE_S          = 1.2   # arama pozu otursun + ilk tarama (süpürme öncesi)
+    # Küpü ortalama (base'i çevirip küpü kare ortasına getir)
+    CENTER_TOL_PX            = 40    # bu kadar yakınsa ortalanmış say
+    CENTER_MAX_STEP          = 8     # tek adımda en fazla kaç derece
+    CENTER_INIT_STEP         = 4     # eğim daha bilinmiyorken ilk adım
+    CENTER_MIN_SLOPE         = 0.4   # px/derece; altındaysa eğim güvenilmez
+    CENTER_MAX_STEPS         = 24    # bu kadarda ortalanmazsa olduğu yerden kap
+    SEARCH_SETTLE_S          = 1.2   # arama pozu otursun (süpürme öncesi)
+    PICKUP_SEAT_SETTLE_S     = 1.5   # kapma öncesi servolar otursun
+    PICKUP_SEAT_MAX_TRIES    = 18    # kol search_pose'a varana dek poll (×200ms)
+    # Arama prescan: YOLO'yu hemen açma; önce kol+base 40'a otursun, beklesin
+    CUBE_PRESCAN_WAIT_S      = 3.0   # başlangıç pozuna varınca YOLO'dan önce bekle
+    CUBE_PRESCAN_MAX_S       = 12.0  # varış için üst sınır (arm_state gelmezse)
+    # Bırakma: kol sabit drop_pose'a gider, bekler, mıknatıs kapanır
+    CUBE_RELEASE_REACH_MAX_S = 6.0   # drop_pose'a varış üst sınırı
+    CUBE_RELEASE_HOLD_S      = 2.0   # pozda bekleme, sonra mıknatıs kapanır
+    CUBE_RELEASE_TOL         = 5     # bu kadar yakınsa "vardı"
+    # Bırakma pozu AGV bazında (her kol farklı) — [base, shoulder, elbow, gripper].
+    # config'te autonomous.drop_pose varsa o kullanılır.
+    DROP_POSE_DEFAULTS = {
+        "AGV_1": [93, 53, 70, 75],
+        "AGV_2": [107, 58, 81, 48],
+    }
 
     def _build_cube_pickup_panel(self, parent):
         """Operations 'KÜP TOPLAMA' paneli: alınacak küp + bırakılacak yer seç →
@@ -2608,8 +2639,8 @@ class AGVControlApp(ctk.CTk):
             lbl.configure(text=("⏳ " + " | ".join(ops)) if ops else "")
 
     def _cube_drop_node_changed(self, node: str):
-        """Bırak-node seçimi değişti → kenar dropdown'ını o node'un boş çizgisiz
-        kenarlarıyla doldur (Türkçe etiket → harf eşlemesi sakla)."""
+        """Bırak-node seçimi değişince kenar dropdown'ını o node'un boş
+        çizgisiz kenarlarıyla doldur (Türkçe etiket-harf eşlemesini sakla)."""
         sides = self._cube_free_sides(node)
         self._cube_drop_side_map = {SIDE_LABELS_TR.get(s, s): s for s in sides}
         labels = list(self._cube_drop_side_map.keys()) or ["— boş kenar yok —"]
@@ -2620,10 +2651,10 @@ class AGVControlApp(ctk.CTk):
                 self.cube_drop_side_var.set(labels[0])
 
     def _build_tab_cubes(self):
-        """Küpler sekmesi YALNIZ yerleştirme/kaldırma: SOL — büyük küp haritası
-        (node + çizgisiz kenar işaretleme), SAĞ — 4 küp durum kartı + Yerleştir/
-        Kaldır. Al→götür→bırak operasyonu Operations sekmesindeki KÜP TOPLAMA
-        panelinden yürütülür."""
+        """Küpler sekmesi yalnızca yerleştirme/kaldırma için: solda büyük küp
+        haritası (node + çizgisiz kenar işaretleme), sağda 4 küp durum kartı +
+        Yerleştir/Kaldır. Al-götür-bırak operasyonu Operations sekmesindeki küp
+        toplama panelinden yürütülür."""
         tab = self.tab_cubes
         tab.grid_columnconfigure(0, weight=2)
         tab.grid_columnconfigure(1, weight=1)
@@ -2723,7 +2754,7 @@ class AGVControlApp(ctk.CTk):
 
     # ---------- yerleştirme (harita) ----------
     def _cube_free_sides(self, node: str) -> List[str]:
-        """Çizgisiz VE başka küp olmayan kenarlar."""
+        """Çizgisiz ve başka küp olmayan kenarlar."""
         return [s for s in free_sides(self.fleet_graph, node)
                 if self.cube_store.cube_at(node, s) is None]
 
@@ -2873,6 +2904,10 @@ class AGVControlApp(ctk.CTk):
         if pos == drop_node:
             self._cube_send_face(agv_id, op["drop_side"], "DELIVER_FACE")
         else:
+            # Yük alındı — taşıma node'una giderken ilk dönüş güçlü başlasın
+            # (sonra normale döner); flag'i setHop'tan önce set et.
+            if self.client:
+                self.client.command(agv_id, "boostTurn")
             self._planner_assign_target(agv_id, drop_node, interactive=False)
             m = self.fleet_planner.missions.get(agv_id)
             if m is None or m.goal != drop_node or len(m.path) <= 1:
@@ -2918,46 +2953,54 @@ class AGVControlApp(ctk.CTk):
         self._cube_start_search(agv_id)
 
     def _cube_start_search(self, agv_id: str):
-        """Arama pozuna geç + kamera/YOLO aç + base süpürmeyi başlat. Kol
-        shoulder/elbow/gripper'ı search_pose'a (kamera sahaya bakar), base
-        süpürme alt açısına gider; tick base'i alt↔üst arası süpürür, küp
-        görününce PICKUP, SEARCH_SWEEPS tur bulamazsa 'küp bulunamadı'."""
+        """Önce kol arama pozuna + base bmin'e gelir, oturur,
+        CUBE_PRESCAN_WAIT_S bekler; sonra YOLO açılıp bmin→bmax süpürme başlar.
+        (YOLO'yu hareket halindeyken/erken açınca küpü kaçırıp AIM'de 'tespit
+        yok' diyordu.) Küp görününce ortalanıp PICKUP'a geçilir; bulamazsa 'küp
+        bulunamadı'."""
         op = self.cube_ops.get(agv_id)
         if op is None:
             return
         self._ensure_arm_state(agv_id)
-        # BUG-4: op'un kamera/YOLO'yu AÇTIĞINI işaretle ki bitince yalnız op'un
-        # açtığını kapatalım (kullanıcının manuel açtığına dokunma — sızıntıyı
-        # önler: yoksa YOLO çıkarımı + stream op sonrası süresiz açık kalırdı).
+        # Stream'i aç ama YOLO'yu şimdi açma — prescan bitince açılacak.
+        # detect_opened: tespiti op açtıysa bitince sadece onu kapat (sızıntı yok).
         dv = self.detect_vars.get(agv_id)
-        op["detect_opened"] = not (dv is not None and dv.get())
+        op["detect_was_on"] = bool(dv is not None and dv.get())
+        op["detect_opened"] = False
         op["cam_opened"] = agv_id not in self.stream_readers
         self._cam_connect(agv_id)
-        self.detect_vars[agv_id].set(True)
 
         auto = self._pickup_cfg(agv_id).get("autonomous", {}) or {}
         sp = auto.get("search_pose") or [90, 130, 10, 75]
         bmin = int(auto.get("search_base_min", self.SEARCH_BASE_MIN_DEFAULT))
         bmax = int(auto.get("search_base_max", self.SEARCH_BASE_MAX_DEFAULT))
         sweeps = int(auto.get("search_sweeps", self.SEARCH_SWEEPS_DEFAULT))
-        speed = int(auto.get("pickup_speed_ms", 40) or 40)
+        # Arama hızı kapmadan yavaş (YOLO yakalasın); kapmada normale döner.
+        speed = int(auto.get("search_speed_ms", self.SEARCH_SPEED_MS_DEFAULT)
+                    or self.SEARCH_SPEED_MS_DEFAULT)
 
         op["phase"] = "SEARCH"
         op["search_bmin"], op["search_bmax"] = bmin, bmax
-        op["search_target"] = bmax     # ilk yön: alt → üst
+        op["search_target"] = bmax       # prescan sonrası 40→140 süpür
         op["search_turns_left"] = max(1, sweeps)
-        op["search_armed"] = False     # poz oturana kadar süpürme başlamaz
-        op["deadline"] = time.time() + self.SEARCH_SETTLE_S    # poz oturma
+        op["search_armed"] = False
+        op["prescan"] = True
+        op["prescan_arrived"] = False
+        op["prescan_until"] = 0.0
+        op["prescan_max"] = time.time() + self.CUBE_PRESCAN_MAX_S
+        # prescan bu 4 servo da varana kadar bekler, sonra YOLO'yu açar
+        op["prescan_target"] = [bmin, int(sp[1]), int(sp[2]), int(sp[3])]
         op["search_deadline"] = time.time() + self.CUBE_SEARCH_TIMEOUT_S
 
         self._arm_http_get(agv_id, f"/servo/speed?ms={speed}")
-        # shoulder ÖNCE (çarpışma önleme, _goto_search ile aynı mantık)
+        # shoulder önce (çarpışma önleme), sonra elbow/gripper, base 40'a
         self._arm_http_get(agv_id, f"/servo?id=1&a={int(sp[1])}")
         self._arm_http_get(agv_id, f"/servo?id=2&a={int(sp[2])}")
         self._arm_http_get(agv_id, f"/servo?id=3&a={int(sp[3])}")
-        self._arm_http_get(agv_id, f"/servo?id=0&a={bmin}")    # base başlangıç
-        self._cube_log(agv_id, f"🔍 küp aranıyor: base {bmin}↔{bmax} süpürme "
-                               f"({op['search_turns_left']} tur)")
+        self._arm_http_get(agv_id, f"/servo?id=0&a={bmin}")    # base {bmin}° (başlangıç)
+        self._cube_log(agv_id, f"🦾 arama pozu + base {bmin}° — kol oturunca "
+                               f"{self.CUBE_PRESCAN_WAIT_S:g} sn sonra YOLO açılıp "
+                               f"{bmin}→{bmax} ({op['search_turns_left']} tur) aranır")
         self._refresh_cube_panel()
 
     def _cube_ops_tick(self):
@@ -2993,6 +3036,8 @@ class AGVControlApp(ctk.CTk):
             elif ph == "SEARCH":
                 self._cube_search_tick(agv_id, op, now)
             elif ph == "PICKUP":
+                if agv_id in self._pickup_arming:
+                    continue   # tarama pozuna geçiyor (settle) — henüz başlamadı
                 pc = self.auto_pickup.get(agv_id)
                 if pc is None:
                     self._cube_op_fail(agv_id, "kontrolör yok")
@@ -3002,10 +3047,10 @@ class AGVControlApp(ctk.CTk):
                     var = self.arm_magnet_vars.get(agv_id)
                     if var is not None:
                         var.set(True)
-                    # Taşıma pozu: kol HOME'a (mıknatıs AÇIK kalır; firmware
+                    # Taşıma pozu: kol HOME'a (mıknatıs açık kalır; firmware
                     # 3-aşamalı home + grip 'held' iken termal sayaç durur).
-                    # Kol HOME'a oturmadan AGV hareket ederse çarpabilir →
-                    # DELIVER_HOME fazında CUBE_DELIVER_HOME_S bekle, sonra taşı.
+                    # Kol HOME'a oturmadan AGV hareket ederse çarpabilir, bu
+                    # yüzden DELIVER_HOME fazında CUBE_DELIVER_HOME_S bekleyip taşı.
                     self._arm_http_get(agv_id, "/arm/home")
                     # Kapma bitti — taşıma sırasında kamera/YOLO gereksiz (BUG-4).
                     self._cube_search_cleanup(agv_id, op)
@@ -3025,36 +3070,105 @@ class AGVControlApp(ctk.CTk):
         """Base süpürme arama: küp görününce PICKUP; base hedefe varınca yön
         çevir; SEARCH_SWEEPS git-gel bulamazsa 'küp bulunamadı' iptal.
 
-        Base açısı /poll arm_state'ten okunur (cube_ops aktifken hızlı poll —
+        Base açısı /poll arm_state'ten okunur (cube_ops aktifken hızlı poll,
         _cam_log_loop). arm_state yoksa süpürme adımı bekler (zararsız)."""
-        # 1) Küp göründü mü? → base'i durdur, kapmaya geç
+        # 0) Prescan: kol arama pozuna + base bmin'e otursun (4 servo da varsın),
+        #    biraz beklesin, sonra YOLO açılıp süpürme başlasın. YOLO'yu hareket
+        #    halindeyken açınca küpü kaçırıyordu.
+        if op.get("prescan"):
+            st = self.arm_state.get(agv_id) or {}
+            servos = st.get("servos")
+            tgt = op.get("prescan_target") or []
+            if not op.get("prescan_arrived"):
+                arrived = bool(servos and len(servos) >= 4 and len(tgt) >= 4
+                               and all(abs(float(servos[i]) - tgt[i]) <= 6
+                                       for i in range(4)))
+                if arrived or now > op.get("prescan_max", now + 1):
+                    op["prescan_arrived"] = True
+                    op["prescan_until"] = now + self.CUBE_PRESCAN_WAIT_S
+                    self._cube_log(agv_id, f"⏱ arama pozunda ({op['search_bmin']}°) — "
+                                           f"{self.CUBE_PRESCAN_WAIT_S:g} sn bekleniyor, "
+                                           f"sonra YOLO açılacak")
+                else:
+                    return                       # kol henüz başlangıç pozuna varmadı
+            if now < op.get("prescan_until", now):
+                return                            # bekleme sürüyor
+            # prescan bitti → YOLO aç + süpürmeye başla (40→140)
+            op["prescan"] = False
+            op["search_armed"] = True
+            dv = self.detect_vars.get(agv_id)
+            if dv is not None and not dv.get():
+                dv.set(True)
+                op["detect_opened"] = True
+            self.detection_state.pop(agv_id, None)    # bayat tespit temizle
+            self._arm_http_get(agv_id, f"/servo?id=0&a={op['search_target']}")
+            self._cube_log(agv_id, f"🔍 YOLO açıldı — küp aranıyor "
+                                   f"(base {op['search_bmin']}→{op['search_bmax']} süpürme)")
+            return
+        # 1) Küp göründüyse base'i çevirip kareye ortala, ortalanınca kap.
+        #    Base'in hangi yöne ortaladığını bilmiyoruz; bir adım atıp eğime
+        #    bakarak buluyoruz (secant). Base son adıma varmadan yeni adım atılmaz
+        #    (titreme önlemi).
         det = self.detection_state.get(agv_id)
         if det and now - float(det.get("ts", 0)) < 0.5:
             st = self.arm_state.get(agv_id) or {}
             servos = st.get("servos")
-            if servos:
-                self._arm_http_get(agv_id, f"/servo?id=0&a={int(servos[0])}")
-            op["phase"] = "PICKUP"
-            self._cube_log(agv_id, "🎯 küp bulundu — kapma başlıyor")
-            self._pickup_start(agv_id)
-            pc = self.auto_pickup.get(agv_id)
-            if pc is None or not pc.active:
-                self._cube_op_fail(agv_id, "kapma başlatılamadı (kalibrasyon?)")
-            else:
+            if not servos:
+                return                          # base açısı yok — bir tick bekle
+            base_cur = float(servos[0])
+            # base son ortalama komutuna varmadıysa bekle (overshoot/oscilasyon önler)
+            cmd_base = op.get("center_cmd_base")
+            if cmd_base is not None and abs(base_cur - cmd_base) > self.SEARCH_ARRIVE_TOL:
+                return
+            fw  = float(det.get("frame_w") or 480) or 480.0
+            cx  = float(det.get("cx", fw / 2.0))
+            err = cx - fw / 2.0                 # +err = küp merkezin sağında
+            bmin, bmax = op["search_bmin"], op["search_bmax"]
+            steps = int(op.get("center_steps", 0))
+            if abs(err) <= self.CENTER_TOL_PX or steps >= self.CENTER_MAX_STEPS:
+                self._arm_http_get(agv_id, f"/servo?id=0&a={int(round(base_cur))}")
+                op["phase"] = "PICKUP"
+                tag = "ortalandı" if abs(err) <= self.CENTER_TOL_PX else "ortalanamadı(cap)"
+                self._cube_log(agv_id, f"🎯 küp {tag} (base {int(round(base_cur))}°, "
+                                       f"sapma {int(err)}px) — kapma başlıyor")
+                self._pickup_start(agv_id)
                 self._refresh_cube_panel()
+                return
+            # secant base adımı: slope = d(err)/d(base); kararlı sign için cache
+            lb = op.get("center_last_base"); le = op.get("center_last_err")
+            slope = op.get("center_slope")
+            if lb is not None and le is not None and abs(base_cur - lb) >= 1.0:
+                slope = (err - le) / (base_cur - lb)
+                op["center_slope"] = slope
+            if slope is not None and abs(slope) >= self.CENTER_MIN_SLOPE:
+                step = max(-self.CENTER_MAX_STEP,
+                           min(self.CENTER_MAX_STEP, -err / slope))
+            else:
+                # Eğim daha bilinmiyor → süpürme yönünde bir adım at. Süpürmeyle
+                # kareye giren küp, süpürme sürdükçe merkeze doğru gider; bu adım
+                # sonrası eğimi öğrenip Newton ile keseriz.
+                sweep_tgt = float(op.get("search_target") or bmax
+                                  or self.SEARCH_BASE_MAX_DEFAULT)
+                sweep_dir = 1 if sweep_tgt >= base_cur else -1
+                step = self.CENTER_INIT_STEP * sweep_dir
+            base_new = int(round(max(bmin, min(bmax, base_cur + step))))
+            op["center_last_base"] = base_cur
+            op["center_last_err"]  = err
+            op["center_cmd_base"]  = base_new
+            op["center_steps"]     = steps + 1
+            if base_new != int(round(base_cur)):
+                self._arm_http_get(agv_id, f"/servo?id=0&a={base_new}")
             return
-        # 2) Toplam güvenlik süresi
+        # Küp görünmüyor → süpürmeye devam. Ortalama ara-state'ini temizle ama
+        # öğrenilen eğim yönünü (slope) sakla; küp tekrar görününce işe yarar.
+        for _k in ("center_cmd_base", "center_last_base", "center_last_err"):
+            op.pop(_k, None)
+        # Toplam güvenlik süresi
         if now > op.get("search_deadline", now + 1):
             self._cube_op_fail(agv_id, "küp bulunamadı (zaman aşımı)")
             return
-        # 3) Arama pozu otursun (ilk SETTLE), sonra süpürmeyi başlat
-        if not op.get("search_armed"):
-            if now < op["deadline"]:
-                return
-            op["search_armed"] = True
-            self._arm_http_get(agv_id, f"/servo?id=0&a={op['search_target']}")
-            return
-        # 4) Base hedefe vardı mı? → yön çevir / tur say
+        # Base uca vardıysa 1 leg bitti — yön çevir, leg'ler bitince pes et.
+        # search_turns_left = leg sayısı (40→140 bir leg, 140→40 bir leg).
         st = self.arm_state.get(agv_id) or {}
         servos = st.get("servos")
         if not servos:
@@ -3063,20 +3177,17 @@ class AGVControlApp(ctk.CTk):
         tgt = op["search_target"]
         if abs(base_cur - tgt) <= self.SEARCH_ARRIVE_TOL:
             bmin, bmax = op["search_bmin"], op["search_bmax"]
-            if tgt == bmax:
-                op["search_target"] = bmin          # üst'e vardı → alt'a dön
-            else:
-                op["search_turns_left"] -= 1        # alt'a döndü → 1 git-gel bitti
-                if op["search_turns_left"] <= 0:
-                    self._cube_op_fail(agv_id, "küp bulunamadı")
-                    return
-                op["search_target"] = bmax
+            op["search_turns_left"] -= 1            # bir uca varış = 1 leg bitti
+            if op["search_turns_left"] <= 0:
+                self._cube_op_fail(agv_id, "küp bulunamadı")
+                return
+            op["search_target"] = bmin if tgt == bmax else bmax   # yön çevir
             self._arm_http_get(agv_id, f"/servo?id=0&a={op['search_target']}")
 
     def _cube_search_cleanup(self, agv_id: str, op: Optional[dict] = None):
-        """Küp op'unun AÇTIĞI kamera stream + YOLO tespitini kapat (BUG-4 sızıntı
-        önlemi). op verilmezse cube_ops'tan alınır. Kullanıcının manuel açtığı
-        stream/tespit (op açmadıysa) korunur. detection_state her hâlükârda
+        """Küp op'unun açtığı kamera stream + YOLO tespitini kapat (BUG-4
+        sızıntı önlemi). op verilmezse cube_ops'tan alınır. Kullanıcının manuel
+        açtığı stream/tespit (op açmadıysa) korunur. detection_state her durumda
         temizlenir (bayat tespit bir sonraki op'u yanıltmasın)."""
         if op is None:
             op = self.cube_ops.get(agv_id)
@@ -3090,14 +3201,33 @@ class AGVControlApp(ctk.CTk):
         self.detection_state.pop(agv_id, None)
 
     def _cube_op_fail(self, agv_id: str, msg: str):
+        """İptal/başarısızlık: görevi iptal et, AGV'yi IDLE'a, kolu HOME'a al.
+        Mıknatıs: kapma sırasında kontrolör zaten kapatmış olur; taşıma
+        sırasındaysa açık kalır (küp tutulu, sonra yine teslim edilebilir).
+        ACİL DUR buradan geçmez — orada kol freeze edilir."""
         op = self.cube_ops.pop(agv_id, None)
+        self._pickup_arming.discard(agv_id)      # arming penceresini iptal et
+        self._pickup_seat_target.pop(agv_id, None)
+        # Kontrolör çalışıyorsa durdur (kol HOME ile çakışmasın)
+        pc = self.auto_pickup.get(agv_id)
+        if pc is not None and getattr(pc, "active", False):
+            pc.stop()
+        # Görev iptal + AGV STOP (→ IDLE) + taşıma modunu kapat (dönüş normale)
+        self.fleet_planner.cancel_mission(agv_id)
+        if self.client:
+            self.client.clear_mission(agv_id)
+            self.client.command(agv_id, "stop")
+            self.client.command(agv_id, "carryOff")
+        # Kol HOME (arama/kapma pozundan geri çekil)
+        self._arm_http_get(agv_id, "/arm/home")
         self._cube_search_cleanup(agv_id, op)
-        self._cube_log(agv_id, f"✗ operasyon iptal: {msg}")
+        self._cube_log(agv_id, f"✗ operasyon iptal: {msg} — görev iptal, kol HOME")
         self._set_status(f"{agv_id} küp operasyonu: {msg}", err=True)
         self._refresh_cube_panel()
 
     def _cube_op_cancel(self):
-        """✖ İptal: harita yerleştirme modu + aktif AGV'nin küp operasyonu."""
+        """✖ İptal: harita yerleştirme modu + aktif AGV'nin küp operasyonu.
+        Tüm reset (görev iptal + AGV STOP + kol HOME) _cube_op_fail'de."""
         if self.cube_map.placing:
             self.cube_map.cancel_placement()
             self._cube_hint("")
@@ -3105,16 +3235,6 @@ class AGVControlApp(ctk.CTk):
             return
         agv = self.active_agv
         if agv and agv in self.cube_ops:
-            op = self.cube_ops[agv]
-            if op["phase"] in ("GOTO", "DELIVER_GOTO"):
-                self.fleet_planner.cancel_mission(agv)
-                if self.client:
-                    self.client.clear_mission(agv)
-                    self.client.command(agv, "stop")
-            elif op["phase"] == "PICKUP":
-                self._pickup_stop(agv)
-            elif op["phase"] == "SEARCH":
-                self._arm_http_get(agv, "/arm/freeze")   # base süpürmeyi durdur
             self._cube_op_fail(agv, "kullanıcı iptali")
         else:
             self._set_status("İptal edilecek küp operasyonu yok")
@@ -3125,7 +3245,7 @@ class AGVControlApp(ctk.CTk):
         if res is None:
             return
         client, agv = res
-        # BUG-5: küp operasyonu faceComplete beklerken manuel faceDir gönderme —
+        # BUG-5: küp operasyonu faceComplete beklerken manuel faceDir gönderme;
         # gelen faceComplete op'u (yanlış yöne dönülmüş olsa bile) ilerletir.
         op = self.cube_ops.get(agv)
         if op is not None and op.get("phase") in ("FACE", "DELIVER_FACE"):
@@ -3138,92 +3258,146 @@ class AGVControlApp(ctk.CTk):
             self._set_status("faceDir gönderilemedi", err=True)
 
     def _cube_release_seq(self, agv_id: str):
-        """Bırakma dizisi: IK ile ön-aşağı poza in → mıknatıs KAPAT → HOME.
-        Kinematik yoksa / poz zarf dışıysa olduğu yerde bırakır (uyarı ile)."""
+        """Bırakma: kol sabit drop_pose'a gider, varınca bekler, mıknatıs
+        kapanır (küp düşer), HOME'a çekilir, store.drop ile küp işlenir, görev
+        biter. IK yok — drop_pose ya config'ten (autonomous.drop_pose) ya da
+        DROP_POSE_DEFAULTS'tan gelir, AGV bazında (her kol farklı)."""
         op = self.cube_ops.get(agv_id)
         if op is None:
             return
         op["phase"] = "RELEASE"
         self._refresh_cube_panel()
-        from arm_kinematics import ArmModel
         self.pickup_cfgs[agv_id] = self._pickup_load_config(agv_id)
         auto = (self.pickup_cfgs[agv_id].get("autonomous") or {})
-        kin = auto.get("kinematics") or {}
-        model = ArmModel(kin)
-        drop_fwd = float(auto.get("drop_fwd_cm", 13.0) or 13.0)
-        cube_cm = float(kin.get("cube_cm") or 4.0)
-        tgt = None
-        if not model.missing():
-            try:
-                # tip = mıknatıs ucu; küp altında → küp tabanı yerde olsun
-                tgt = model.ik(drop_fwd, 0.0, cube_cm + 0.4)
-            except Exception:
-                tgt = None
-        if tgt is not None:
-            pc = self._pickup_get(agv_id)
-            pc._cfg = {**pc.DEFAULTS, **auto}     # zarf bantları taze olsun
-            cmd = [int(round(v)) for v in tgt]
-            if not pc._envelope_ok(cmd):
-                tgt = None
+        dp = (auto.get("drop_pose") or self.DROP_POSE_DEFAULTS.get(agv_id)
+              or [90, 130, 10, 75])
+        cmd = [int(round(float(v))) for v in dp][:4]
+        op["release_cmd"] = cmd
+        op["release_reach_deadline"] = time.time() + self.CUBE_RELEASE_REACH_MAX_S
         speed = int(auto.get("pickup_speed_ms", 40) or 40)
         self._arm_http_get(agv_id, f"/servo/speed?ms={speed}")
-        if tgt is not None:
-            cmd = [int(round(v)) for v in tgt]
-            for i, v in enumerate(cmd):
-                self._arm_http_get(agv_id, f"/servo?id={i}&a={v}")
-            self._cube_log(agv_id, f"bırakma pozuna iniliyor {cmd} "
-                                   f"(ileri {drop_fwd:g} cm)")
-            settle_ms = 3500
+        # shoulder önce (çarpışma önleme), sonra base/elbow/gripper
+        self._arm_http_get(agv_id, f"/servo?id=1&a={cmd[1]}")
+        self._arm_http_get(agv_id, f"/servo?id=0&a={cmd[0]}")
+        self._arm_http_get(agv_id, f"/servo?id=2&a={cmd[2]}")
+        self._arm_http_get(agv_id, f"/servo?id=3&a={cmd[3]}")
+        self._cube_log(agv_id, f"📍 bırakma pozuna gidiliyor {cmd} — varınca "
+                               f"{self.CUBE_RELEASE_HOLD_S:g} sn bekleyip bırakılacak")
+        self.after(300, lambda a=agv_id: self._cube_release_reach(a))
+
+    def _cube_release_reach(self, agv_id: str):
+        """drop_pose'a varışı bekle (arm_state tazeyse servos≈cmd, gelmezse
+        timeout), sonra bekleme süresini başlat. Faz RELEASE değilse no-op —
+        ACİL DUR/iptal bu after zincirini böyle keser."""
+        op = self.cube_ops.get(agv_id)
+        if op is None or op.get("phase") != "RELEASE":
+            return
+        cmd = op.get("release_cmd") or []
+        st = self.arm_state.get(agv_id) or {}
+        servos = st.get("servos")
+        fresh = bool(st and time.time() - float(st.get("ts", 0)) < 1.0)
+        arrived = bool(fresh and servos and len(servos) >= 4 and len(cmd) >= 4
+                       and all(abs(float(servos[i]) - cmd[i]) <= self.CUBE_RELEASE_TOL
+                               for i in range(4)))
+        if arrived or time.time() > op.get("release_reach_deadline", 0):
+            self._cube_log(agv_id, f"⏱ pozda — {self.CUBE_RELEASE_HOLD_S:g} sn "
+                                   f"bekleniyor, sonra bırakılacak")
+            self.after(int(self.CUBE_RELEASE_HOLD_S * 1000),
+                       lambda a=agv_id: self._cube_release_drop(a))
         else:
-            self._cube_log(agv_id, "⚠ kinematik yok / poz zarf dışı — küp "
-                                   "olduğu pozdan bırakılıyor")
-            settle_ms = 300
+            self.after(200, lambda a=agv_id: self._cube_release_reach(a))
 
-        # GUARD (BUG-1): bu after() zinciri ACİL DUR / iptal sırasında iptal
-        # edilemez (after_id saklanmıyor). ACİL DUR cube_ops'u temizler +
-        # /arm/freeze yollar; guard'sız _do_home koşulsuz /arm/home ile freeze'i
-        # ezip kolu hareket ettirirdi. Faz hâlâ RELEASE değilse no-op.
-        def _do_release():
-            op2 = self.cube_ops.get(agv_id)
-            if op2 is None or op2.get("phase") != "RELEASE":
-                return                                   # iptal edildi / estop
-            self._arm_http_get(agv_id, "/magnet?s=0")
-            var = self.arm_magnet_vars.get(agv_id)
-            if var is not None:
-                var.set(False)
-            self.after(900, _do_home)
+    def _cube_release_drop(self, agv_id: str):
+        """HOLD bitti → mıknatıs KAPAT (küp bırak) → kısa bekle → HOME."""
+        op = self.cube_ops.get(agv_id)
+        if op is None or op.get("phase") != "RELEASE":
+            return
+        self._arm_http_get(agv_id, "/magnet?s=0")
+        var = self.arm_magnet_vars.get(agv_id)
+        if var is not None:
+            var.set(False)
+        self._cube_log(agv_id, "🧲 mıknatıs KAPALI — küp bırakıldı")
+        self.after(900, lambda a=agv_id: self._cube_release_home(a))
 
-        def _do_home():
-            op2 = self.cube_ops.get(agv_id)
-            if op2 is None or op2.get("phase") != "RELEASE":
-                return                                   # iptal edildi / estop
-            self._arm_http_get(agv_id, "/arm/home")
-            self.cube_ops.pop(agv_id, None)
-            dn = str(op2.get("drop_node") or op2.get("node") or "")
-            ds = str(op2.get("drop_side") or op2.get("side") or "")
-            if dn and ds:
-                self.cube_store.drop(op2["cube_id"], dn, ds)
-                self._cube_log(agv_id,
-                               f"📦 K{op2['cube_id']} bırakıldı: {dn}·"
-                               f"{SIDE_LABELS_TR.get(ds, ds)}")
-            self._cube_search_cleanup(agv_id)
-            self._cubes_redraw()
+    def _cube_release_home(self, agv_id: str):
+        """Küp düştü → kol HOME (geri çekil) + store.drop + temizlik → görev biter."""
+        op = self.cube_ops.get(agv_id)
+        if op is None or op.get("phase") != "RELEASE":
+            return
+        self._arm_http_get(agv_id, "/arm/home")
+        self.cube_ops.pop(agv_id, None)
+        # Yük bırakıldı — taşıma modu kapansın (dönüşler normale dönsün).
+        if self.client:
+            self.client.command(agv_id, "carryOff")
+        dn = str(op.get("drop_node") or op.get("node") or "")
+        ds = str(op.get("drop_side") or op.get("side") or "")
+        if dn and ds:
+            self.cube_store.drop(op["cube_id"], dn, ds)
+            self._cube_log(agv_id,
+                           f"📦 K{op['cube_id']} bırakıldı: {dn}·"
+                           f"{SIDE_LABELS_TR.get(ds, ds)}")
+        # Görev bitti — YOLO tespitini kapat (kim açmış olursa olsun).
+        dv = self.detect_vars.get(agv_id)
+        if dv is not None and dv.get():
+            dv.set(False)
+            self._cube_log(agv_id, "🎯 YOLO tespiti kapatıldı (görev bitti)")
+        self._cube_search_cleanup(agv_id)
+        self._cubes_redraw()
 
-        self.after(settle_ms, _do_release)
-
-    # ---------- Kapma kalibrasyonu (base sweep) — KALDIRILDI ----------
+    # ---------- Kapma kalibrasyonu (base sweep) — kaldırıldı ----------
     # Eski manuel tarama state machine'i (_pickup_scan_*, SCAN_TYPES, scan_pose)
-    # kaldirildi. Base taramasi PickupController.SCAN durumunda otomatik yapilir;
-    # guvenli bolge arm_sim sinir sihirbazindan (safe_envelope) gelir.
+    # kaldırıldı. Base taraması PickupController.SCAN durumunda otomatik yapılır;
+    # güvenli bölge arm_sim sınır sihirbazından (safe_envelope) gelir.
 
-    # ---------- Otomatik takip — KALDIRILDI ----------
+    # ---------- Otomatik takip — kaldırıldı ----------
     # Tüm vision-servoing kodu (_on_track_*, _toggle_tracking, _start_tracking,
     # _stop_tracking, _tracking_step) kaldırıldı. Yeni tespit pipeline'ı
     # yazıldıktan sonra burada yeniden kurulacak.
 
+    def _detect_loop(self):
+        """Arka thread: tespiti açık her AGV'nin frame'inde YOLO çalıştırır,
+        sonucu detection_state'e (kontrolör/ortalama okur) + _det_results'a (UI
+        overlay) yazar. Inference UI thread'inde değil ki arayüz donmasın. Tek
+        thread — detector singleton aynı anda iki inference yapamaz."""
+        while not self._detect_stop.is_set():
+            worked = False
+            for agv_id, reader in list(self.stream_readers.items()):
+                dv = self.detect_vars.get(agv_id)
+                if not (dv is not None and dv.get()):
+                    continue
+                frame, _count = reader.read()
+                if frame is None:
+                    continue
+                worked = True
+                try:
+                    det = get_detector()
+                    dets = det.detect(frame)
+                    best = det.best(dets)
+                    now = time.time()
+                    if best is not None:
+                        self.detection_state[agv_id] = {
+                            "cx": best.cx, "cy": best.cy, "area": best.area,
+                            "conf": best.conf, "h": best.height,
+                            "w": best.x2 - best.x1,
+                            "x1": best.x1, "y1": best.y1, "x2": best.x2, "y2": best.y2,
+                            "frame_w": frame.shape[1], "frame_h": frame.shape[0],
+                            "ts": now,
+                        }
+                    else:
+                        self.detection_state.pop(agv_id, None)
+                    # UI overlay için (tek atomik dict ataması)
+                    self._det_results[agv_id] = {
+                        "dets": dets, "ms": det.last_infer_ms, "n": len(dets),
+                    }
+                except Exception:
+                    pass
+            # tespit varsa CPU'nun izin verdiği kadar dön, yoksa idle
+            self._detect_stop.wait(0.01 if worked else 0.1)
+
     def _process_camera(self):
-        """F4: Her aktif stream_reader için frame oku + ilgili video label'i güncelle.
-        Health bar'daki FPS göstergesi de buradan beslenir."""
+        """Her aktif stream'den frame okuyup video label'i + FPS göstergesini
+        günceller. YOLO inference burada değil (_detect_loop thread'inde); burada
+        sadece son tespit sonucu overlay olarak çizilir."""
         if not self.stream_readers:
             return
 
@@ -3231,7 +3405,7 @@ class AGVControlApp(ctk.CTk):
         for agv_id, reader in list(self.stream_readers.items()):
             frame, count = reader.read()
             if frame is None:
-                # Henuz frame yok — durum bilgisi goster (kamera yoksa UI DONMAZ)
+                # Henüz frame yok — durum bilgisini göster (kamera yoksa UI donmaz)
                 ilbl = self.cam_info_lbls.get(agv_id)
                 if ilbl is not None:
                     st = getattr(reader, "status", "")
@@ -3250,35 +3424,29 @@ class AGVControlApp(ctk.CTk):
                 self.cam_last_time[agv_id]  = now
 
             if self.detect_vars.get(agv_id) and self.detect_vars[agv_id].get():
-                det = get_detector()
-                dets = det.detect(frame)
-                det.draw(frame, dets)
-                self.detect_last_ms[agv_id] = det.last_infer_ms
-                self.detect_last_n[agv_id] = len(dets)
-                # Vision-servoing: en iyi kupu state'e yaz (yoksa temizle) — kontrolor okur
-                best = det.best(dets)
-                if best is not None:
-                    self.detection_state[agv_id] = {
-                        "cx": best.cx, "cy": best.cy, "area": best.area,
-                        "conf": best.conf, "h": best.height, "w": best.x2 - best.x1,
-                        "x1": best.x1, "y1": best.y1, "x2": best.x2, "y2": best.y2,
-                        "frame_w": frame.shape[1], "frame_h": frame.shape[0], "ts": now,
-                    }
-                else:
-                    self.detection_state.pop(agv_id, None)
-                info = self.detect_info_lbls.get(agv_id) if hasattr(self, "detect_info_lbls") else None
-                if info is not None:
-                    info.configure(
-                        text=f"{len(dets)} tespit  |  {det.last_infer_ms:.0f} ms")
+                # detection_state'i artık _detect_loop thread'i yazıyor; burada
+                # yalnız son sonucu çiz (inference yok, UI donmaz).
+                res = self._det_results.get(agv_id)
+                if res is not None:
+                    dets = res.get("dets") or []
+                    get_detector().draw(frame, dets)     # draw = inference değil
+                    self.detect_last_ms[agv_id] = res.get("ms", 0.0)
+                    self.detect_last_n[agv_id] = res.get("n", 0)
+                    info = (self.detect_info_lbls.get(agv_id)
+                            if hasattr(self, "detect_info_lbls") else None)
+                    if info is not None:
+                        info.configure(
+                            text=f"{res.get('n', 0)} tespit  |  {res.get('ms', 0):.0f} ms")
             else:
-                # Tespit kapaliysa eski state bayatlamasin (kontrolor yanlis okumasin)
+                # Tespit kapalı → thread de atlar; state/overlay temizle
                 self.detection_state.pop(agv_id, None)
+                self._det_results.pop(agv_id, None)
 
-            # Video label varsa VE Arm sekmesi gorunuyorsa frame'i goster.
-            # OPTIMIZASYON: baska sekme aciksa BGR→RGB + PIL + CTkImage donusumu
-            # bosa is (label gorunmez) — YOLO/tespit yukarida zaten calisti
-            # (kontrolor sekmeden bagimsiz tespit verisine muhtac), yalniz
-            # gorsellestirme atlanir.
+            # Video label varsa ve Arm sekmesi görünüyorsa frame'i göster.
+            # Optimizasyon: başka sekme açıksa BGR→RGB + PIL + CTkImage dönüşümü
+            # boşa iş (label görünmez); YOLO/tespit yukarıda zaten çalıştı
+            # (kontrolör sekmeden bağımsız tespit verisine muhtaç), yalnız
+            # görselleştirme atlanır.
             vlbl = self.cam_video_lbls.get(agv_id)
             if vlbl is None:
                 continue
@@ -3318,10 +3486,10 @@ class AGVControlApp(ctk.CTk):
         self._sensor_lines.append(entry)
         if len(self._sensor_lines) > self.MAX_SENSOR_LINES:
             self._sensor_lines = self._sensor_lines[-self.MAX_SENSOR_LINES:]
-        # Performans: textbox redraw maliyetli (500 satira kadar yeniden yazma).
-        # Sadece Sensors sekmesi gorunurken yenile; diger sekmedeyken sessizce
-        # _sensor_lines'a biriksin. Sekme degisiminde _on_tab_changed tek seferlik
-        # tam refresh atar (asagida).
+        # Performans: textbox redraw maliyetli (500 satıra kadar yeniden yazma).
+        # Sadece Sensors sekmesi görünürken yenile; diğer sekmedeyken sessizce
+        # _sensor_lines'a biriksin. Sekme değişiminde _on_tab_changed tek seferlik
+        # tam refresh atar.
         if hasattr(self, "tabs") and self.tabs.get() == "Sensors":
             self._refresh_sensor_log()
 
@@ -3335,7 +3503,7 @@ class AGVControlApp(ctk.CTk):
         if current == "Sensors" and hasattr(self, "sensor_text"):
             self._refresh_sensor_log()
         if current == "Küpler" and hasattr(self, "cube_map"):
-            # Gizliyken atlanan filo gorunumunu tek seferlik tazele
+            # Gizliyken atlanan filo görünümünü tek seferlik tazele
             self._refresh_operations_map()
 
     def _refresh_sensor_log(self):
@@ -3400,10 +3568,10 @@ class AGVControlApp(ctk.CTk):
         return f"[{ts}] [{ev.agvId or '-'}] {ev.message}\n"
 
     def _add_log(self, ev: LogEvent):
-        """APPEND-ONLY log yazimi. Eski kod her olayda HER IKI textbox'i bastan
-        yaziyordu (500 satir sil + yeniden insert, saniyede onlarca kez) — artik
-        yalniz yeni satir eklenir, tasan satir ustten silinir. Tam yeniden cizim
-        sadece filtre degisiminde/temizlikte (_refresh_log)."""
+        """Append-only log yazımı. Eski kod her olayda iki textbox'i baştan
+        yazıyordu (500 satır sil + yeniden insert, saniyede onlarca kez); artık
+        yalnız yeni satır eklenir, taşan satır üstten silinir. Tam yeniden çizim
+        sadece filtre değişiminde/temizlikte (_refresh_log)."""
         self._log_lines.append(ev)
         if len(self._log_lines) > self.MAX_LOG_LINES:
             self._log_lines = self._log_lines[-self.MAX_LOG_LINES:]
@@ -3431,7 +3599,7 @@ class AGVControlApp(ctk.CTk):
             self.dash_log_box.configure(state="disabled")
 
     def _refresh_log(self):
-        """Log sekmesi TAM yeniden cizim — yalniz filtre degisimi / temizlik."""
+        """Log sekmesi tam yeniden çizim — yalnız filtre değişimi / temizlik."""
         flt = self.log_filter_var.get()
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
@@ -3479,17 +3647,27 @@ class AGVControlApp(ctk.CTk):
                 if kind == "connected":
                     self._update_connection_indicator(connected=True)
                     self._set_status("Server'a baglandi")
+                    self._add_log(LogEvent(
+                        agvId="*", message="[WS] Server'a baglandi",
+                        time_ms=0, wall_time=time.time()))
                 elif kind == "disconnected":
                     self._update_connection_indicator(connected=False)
                     self._set_status("Baglanti kesildi")
+                    self._add_log(LogEvent(
+                        agvId="*", message="[WS] Baglanti KOPTU",
+                        time_ms=0, wall_time=time.time()))
                 elif kind == "error":
+                    # Log'a da yaz (kopma sebebi kaybolmasın).
                     self._set_status(f"WS: {payload}", err=True)
+                    self._add_log(LogEvent(
+                        agvId="*", message=f"[WS] {payload}",
+                        time_ms=0, wall_time=time.time()))
                 elif kind == "agv_list":
                     self.agvs = dict(payload)
-                    # Auto-apply: her AGV icin disconnect→connect gecisini kontrol et
+                    # Auto-apply: her AGV için disconnect→connect geçişini kontrol et
                     for s_ in self.agvs.values():
                         self._check_auto_apply(s_)
-                        # Cam log polling her bagli AGV icin (ilk list'te de baslat)
+                        # Cam log polling her bağlı AGV için (ilk list'te de başlat)
                         if s_.connected:
                             self._cam_log_start_for_agv(s_.id)
                     need_list_refresh   = True
@@ -3509,7 +3687,7 @@ class AGVControlApp(ctk.CTk):
                             need_active_refresh = True
                         # Sensör geçmişine ekle (tüm AGV'lerden)
                         self._record_sensor(s)
-                        # DEBUG: currentWaypoint degisirse logla (drift / pos sync gorunsun)
+                        # currentWaypoint değişirse logla (drift / pos sync görünsün)
                         if prev_wp != s.currentWaypoint:
                             self._add_log(LogEvent(
                                 agvId=s.id,
@@ -3518,11 +3696,11 @@ class AGVControlApp(ctk.CTk):
                                         f"(navState={s.navState})",
                                 time_ms=0, wall_time=time.time(),
                             ))
-                        # Connect/disconnect gecisi → planner'a bildir.
-                        # Disconnect'te mission + rezervasyonlar korunur,
-                        # son pos diger AGV'ler icin engel sayilir.
-                        # Reconnect'te dispatch tekrar baslar (drift correction
-                        # asagidaki on_agv_position ile pos senkronlar).
+                        # Connect/disconnect geçişini planner'a bildir.
+                        # Disconnect'te mission + rezervasyonlar korunur, son pos
+                        # diğer AGV'ler için engel sayılır. Reconnect'te dispatch
+                        # tekrar başlar (drift correction aşağıdaki
+                        # on_agv_position ile pos senkronlar).
                         if prev_connected != s.connected:
                             self.fleet_planner.set_agv_connected(
                                 s.id, s.connected, self._valid_wp(s.currentWaypoint),
@@ -3535,34 +3713,35 @@ class AGVControlApp(ctk.CTk):
                                 time_ms=0, wall_time=time.time(),
                             ))
                             if s.connected:
-                                # Cam log polling baslat (Arm sekmesi gerek yok —
-                                # GRIP olaylari her zaman Log paneline gelir)
+                                # Cam log polling başlat (Arm sekmesi gerekmez —
+                                # GRIP olayları her zaman Log paneline gelir)
                                 self._cam_log_start_for_agv(s.id)
                                 self._planner_tick_and_dispatch()
                             else:
                                 self._cam_log_stop_for_agv(s.id)
                                 # BUG-2: koptuğunda küp operasyonunu iptal et —
-                                # yoksa cube_ops'ta zombi op kalır (180s'e kadar),
-                                # mıknatıs/kapma yarıda kalır. Mıknatısı kapat
+                                # yoksa cube_ops'ta zombi op kalır (180 sn'e kadar)
+                                # ve mıknatıs/kapma yarıda kalır. Mıknatısı kapat
                                 # (HTTP-direct, WS gerekmez) + kontrolörü durdur.
                                 if s.id in self.cube_ops:
                                     self._pickup_stop(s.id)
                                     self._arm_http_get(s.id, "/magnet?s=0")
                                     self._cube_op_fail(s.id, "AGV bağlantısı koptu")
-                        # Planner drift correction: AGV gercek pozisyonu planner'in
-                        # bildiginden farkliysa senkronla. (Connected AGV'ler icin.)
-                        # '?' (bilinmeyen konum sentineli) planner'a sizmasin (FP-10).
+                        # Planner drift correction: AGV'nin gerçek pozisyonu
+                        # planner'ın bildiğinden farklıysa senkronla (yalnız
+                        # bağlı AGV'ler için). '?' (bilinmeyen konum sentineli)
+                        # planner'a sızmasın (FP-10).
                         valid_wp = self._valid_wp(s.currentWaypoint)
                         if s.connected and valid_wp:
                             self._planner_on_agv_position(s.id, valid_wp)
-                            # last_known_pos da guncellensin (disconnect aninda
-                            # son guncel pos kullanilsin diye)
+                            # last_known_pos da güncellensin (disconnect anında
+                            # son güncel pos kullanılsın diye)
                             self.fleet_planner.last_known_pos[s.id] = valid_wp
                 elif kind == "hop_complete":
                     ev = payload   # HopCompleteEvent
-                    # DEBUG TIMING: WS thread'inde ev.wall_time set edildi.
-                    # UI tick'i en fazla UI_TICK_MS (100ms) sonra bunu islar.
-                    # queue_ms = WS thread'den UI _tick'e kadar gecen sure.
+                    # Debug timing: ev.wall_time WS thread'inde set edildi.
+                    # UI tick'i en fazla UI_TICK_MS (100 ms) sonra bunu işler.
+                    # queue_ms = WS thread'den UI _tick'e kadar geçen süre.
                     if (self.client is not None
                         and getattr(self.client, "debug_timing", False)):
                         queue_ms = (time.time() - ev.wall_time) * 1000 \
@@ -3585,7 +3764,7 @@ class AGVControlApp(ctk.CTk):
                     ))
                     self._cube_on_face_complete(ev)
                 elif kind == "ws_debug":
-                    # WS client debug timing event'i — log paneline yansit
+                    # WS client debug timing event'i — log paneline yansıt
                     self._add_log(LogEvent(
                         agvId="*",
                         message=f"[WS] {payload}",
@@ -3593,11 +3772,11 @@ class AGVControlApp(ctk.CTk):
                     ))
                 elif kind == "log":
                     self._add_log(payload)
-                    # Kalibrasyon basarisiz log'unda countdown'i durdur + kirmizi feedback
+                    # Kalibrasyon başarısız log'unda countdown'i durdur + kırmızı feedback
                     log_ev: LogEvent = payload
                     if (log_ev.agvId
                         and "Kalibrasyon basarisiz" in log_ev.message):
-                        # Detayi mesajdan al (": "den sonrasi)
+                        # Detayı mesajdan al (": "den sonrası)
                         detail = log_ev.message.split(":", 1)[1].strip() \
                                  if ":" in log_ev.message else ""
                         self._on_calib_result(log_ev.agvId, success=False,
@@ -3606,15 +3785,15 @@ class AGVControlApp(ctk.CTk):
                     ev: CalibrationDataEvent = payload
                     if ev.agvId:
                         self._last_calib_data[ev.agvId] = ev
-                        # Defensive log: event geldiğini log panelinden de gör
-                        # (eski server firmware bunu forward etmezse hic gelmez)
+                        # Defansif log: event geldiğini log panelinden de gör
+                        # (eski server firmware bunu forward etmezse hiç gelmez)
                         self._add_log(LogEvent(
                             agvId=ev.agvId,
                             message=f"[UI] calibration_data alindi ({len(ev.sensorMin)} min + {len(ev.sensorMax)} max)",
                             time_ms=0,
                             wall_time=time.time(),
                         ))
-                        # Basari: countdown'i durdur + yesil feedback
+                        # Başarı: countdown'i durdur + yeşil feedback
                         self._on_calib_result(ev.agvId, success=True)
                         if self.active_agv == ev.agvId:
                             self._update_preset_panel()
@@ -3627,21 +3806,21 @@ class AGVControlApp(ctk.CTk):
                 # Dashboard kartlarını ve top bar aktif AGV göstergesini yenile
                 self._refresh_dashboard_cards()
                 self._update_active_agv_indicator()
-                # Arm tab aktif AGV değişince kendi içeriğini yeniler (rebuild gerek yok)
+                # Arm tab aktif AGV değişince kendi içeriğini yeniler (rebuild gerekmez)
 
         # Olay gelsin gelmesin her tick: planner deadlock watchdog (FP-01).
-        # WS olayi GELMEDIGI durum (herkes WAIT) tam da donma durumudur.
+        # WS olayının gelmediği durum (herkes WAIT) tam da donma durumudur.
         self._planner_watchdog()
-        # Kup operasyonu faz ilerletme + zaman asimi (GOTO→FACE→WARMUP→PICKUP)
+        # Küp operasyonu faz ilerletme + zaman aşımı (GOTO→FACE→SEARCH→PICKUP)
         self._cube_ops_tick()
 
     def _planner_watchdog(self) -> None:
-        """FP-01: aktif mission varken periyodik nabiz at; tum aktif AGV'ler
-        uzun suredir WAIT'te ise deadlock kurtarma tetikle.
+        """FP-01: aktif mission varken periyodik nabız at; tüm aktif AGV'ler
+        uzun süredir WAIT'te ise deadlock kurtarma tetikle.
 
-        Nabiz `_planner_tick_and_dispatch`'i tekrar cagirir — dedup ayni hop'un
-        tekrar gonderilmesini onler, ama zamana bagli kurtarmalar (yield timeout,
-        disconnect-clear, anti-starvation aging) boylece ilerleyebilir."""
+        Nabız `_planner_tick_and_dispatch`'i tekrar çağırır — dedup aynı hop'un
+        tekrar gönderilmesini önler, ama zamana bağlı kurtarmalar (yield timeout,
+        disconnect-clear, anti-starvation aging) böylece ilerleyebilir."""
         if self.client is None:
             return
         fp = self.fleet_planner
@@ -3695,18 +3874,18 @@ class AGVControlApp(ctk.CTk):
         )
 
     def _set_status_color(self, text: str, color: str):
-        """Aciksiz renk verilebilen status — sonuc gosterimi (yesil/kirmizi)."""
+        """Açıkça renk verilebilen status — sonuç gösterimi (yeşil/kırmızı)."""
         self.status_bar.configure(
             text=f"{time.strftime('%H:%M:%S')} - {text}",
             text_color=color,
         )
 
     # =========================================================================
-    # Kalibrasyon geri sayim — PC-side timer, firmware'e ekstra WS trafigi yok
+    # Kalibrasyon geri sayım — PC tarafı timer, firmware'e ekstra WS trafiği yok
     # =========================================================================
     def _start_calib_countdown(self, agv: str):
         """Yeni kalibrasyon basladi: status bar'da 10 → 0 geri sayim."""
-        # Eski timer varsa iptal
+        # Eski timer varsa iptal et
         self._cancel_calib_countdown()
         self._calib_countdown_agv       = agv
         self._calib_countdown_remaining = self.CALIBRATE_DURATION_SEC
@@ -3718,7 +3897,7 @@ class AGVControlApp(ctk.CTk):
             return
         n = self._calib_countdown_remaining
         if n <= 0:
-            # Firmware'den sonuc gelmedi → timeout uyarisi (15 sn kadar bekliyor olabilir)
+            # Firmware'den sonuç gelmedi → timeout uyarısı (15 sn kadar bekliyor olabilir)
             self._set_status_color(
                 f"{agv}: ⏱ Kalibrasyon süresi doldu, sonuç bekleniyor...",
                 COL_WARN,
@@ -3743,7 +3922,7 @@ class AGVControlApp(ctk.CTk):
         self._calib_countdown_remaining = 0
 
     def _on_calib_result(self, agv: str, success: bool, detail: str = ""):
-        """Sonuç geldi — geri sayım timer'ini durdur + renkli status göster."""
+        """Sonuç geldi — geri sayım timer'ını durdur + renkli status göster."""
         self._cancel_calib_countdown()
         self._last_calibrate_sent.pop(agv, None)
         if success:

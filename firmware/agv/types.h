@@ -63,7 +63,7 @@ extern Heading  heading;                    // Aracın baktığı yön
 extern NavState navState;
 extern bool     isTarget;
 extern bool     calibrationActive;          // true iken webSocketLoop sendStatus'u atlar
-                                            // (WS trafigini azalt, disconnect riskini dusur)
+                                            // (WS trafiğini azaltıp disconnect riskini düşürür)
 
 // --- websocket.ino ---
 extern bool wsConnected;
@@ -126,14 +126,16 @@ void navCommandStop();
 void navCommandSetPID(float kp, float ki, float kd);
 void navCommandSetSpeed(int speed);
 void navCommandCalibrate();
+void navCommandBoostTurn();
+void navCommandCarryOff();
 bool navCommandApplyCalibration(const int* minVals, const int* maxVals);
-// Multi-AGV planner: 3-hop look-ahead emir. from = mevcut konum dogrulamasi,
-// next = simdi gitilecek node, after = next'ten sonraki node, after2 = ondan
-// sonraki (0 ise path sonu), goal = mission nihai hedefi (REACHED check icin).
-// after2 navPath buffer'i derinlestirir → WS gecikmesinde AGV beklemez.
+// Çoklu AGV planner emri (3-hop look-ahead). from = konum doğrulaması,
+// next = şimdi gidilecek node, after = sonraki, after2 = ondan sonraki (0 ise
+// path sonu), goal = mission nihai hedefi (REACHED check için). after2 navPath
+// buffer'ını derinleştirir, WS gecikmesinde AGV beklemez.
 void navCommandHop(char from, char next, char after, char after2 = 0, char goal = 0);
-// Kup yonune don (NAV_IDLE'da): 'N'/'E'/'S'/'W'. O yonde cizgi varsa sensorlu,
-// yoksa OGRENILEN ortalama sureyle zamanli 90° donus. Bitince faceComplete.
+// Küp yönüne dön (NAV_IDLE'da): 'N'/'E'/'S'/'W'. O yönde çizgi varsa sensörlü,
+// yoksa zamanlı 90° dönüş. Bitince faceComplete.
 void navCommandFaceDir(char dirChar);
 
 // --- pathfinder.ino — sadece harita lookup (BFS kaldirildi, path PC'de) ---
@@ -145,9 +147,9 @@ void webSocketInit();
 void webSocketLoop();
 void sendStatus();
 void sendLog(const char* message);
-// Multi-AGV planner: hop tamamlandi bildirimi. PC bunu alip planner.on_hop_complete(agv, node) cagirir.
+// Hop tamamlandı bildirimi — PC planner.on_hop_complete(agv, node) çağırır.
 void sendHopComplete(char node, const char* heading);
-// faceDir tamamlandi bildirimi (node + yeni heading) — PC kapma akisini baslatir.
+// faceDir tamamlandı bildirimi (node + yeni heading) — PC kapma akışını başlatır.
 void sendFaceComplete(char node, const char* heading);
 void sendCalibrationData();
 void wsFlush(int yields = 3);

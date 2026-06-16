@@ -1,27 +1,7 @@
 """
-Calibration Presets — PC tarafinda isimli kalibrasyon profillerini yonetir.
-
-Akis:
-1. AGV manuel kalibrasyonu bitirir → WS uzerinden 'calibrationData' mesajini PC'ye yollar
-2. PC kullanicidan isim ister → preset olarak JSON'a kaydeder
-3. Kullanici sonradan preset secebilir → PC 'applyCalibration' mesajiyla AGV'ye yollar
-4. AGV reconnect olunca PC otomatik son aktif preset'i geri yukler (RAM'de uctugu icin)
-
-Veri formati (pc/calibration_presets.json):
-
-    {
-      "presets": {
-        "<preset_name>": {
-            "createdAt": "2026-05-19T14:30:00",
-            "agvSource": "AGV_1",
-            "note":      "kullanici notu",
-            "sensorMin": [int, int, ... 8 adet],
-            "sensorMax": [int, int, ... 8 adet]
-        },
-        ...
-      },
-      "activePerAgv": { "AGV_1": "<preset_name>", "AGV_2": "..." }
-    }
+Kalibrasyon preset'leri — isimli sensorMin/Max profilleri (pc/calibration_presets.json).
+AGV kalibrasyonu → kaydet → preset seçince AGV'ye uygula → reconnect'te son aktif
+preset geri yüklenir.
 """
 
 from __future__ import annotations
